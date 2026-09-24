@@ -1005,14 +1005,34 @@ E. (`font`'s tiers 0 and 1 - file parsing, outlines, rasterisation - need no
 Unicode at all and can proceed in parallel from phase B onward; see
 `libs/font/documentation/design.md` §17.)
 
-Phase A is **built**: `tools/ucd/` with `fetch.sh`, `gen_tables.py` and
-`gen_sweep.py`; the generated tables and `enums.h`; `utf.h`, `char.h` and
-`set.h`; `tests/unit/test_utf.cpp`, `test_char.cpp`, `test_set.cpp` and
-`test_sweep.cpp`; `tests/fuzz/fuzz_utf.cpp`; and the `gen-ucd-tables`,
-`check-ucd-tables` and `install-conformance` targets. What is not yet done
-from A's line below: the `check-ucd-pins.sh` suite check, and the comparison
-of the sweep sums against `regex`'s `property.c`, which belongs with phase E's
-migration rather than ahead of it.
+**Phases A, B and C are built**, in five commits, each of which builds and
+passes `make test`. What the three of them came to:
+
+| | A | B | C |
+| --- | --- | --- | --- |
+| Modules | `utf`, `char`, `set` | `norm`, `bidi` | `break`, `case`, `script`, `name` |
+| Conformance files | - | 3 | 4 |
+| Tests | 50 | 99 | 148 in 15 binaries |
+| Fuzz harnesses | 1 | 3 | 6 |
+
+And the whole of it: 11,571 lines of code, 65,689 lines of generated tables,
+99.0% line coverage, clean under Valgrind and ASan from an empty build
+directory, serially and under `-j8`.
+
+**What is deliberately not done**, from the phase rows below: the comparison of
+the sweep sums against `regex`'s own `property.c`, and the pairwise Line_Break
+sweep against a pre-move `regex` build. Both are differentials against a
+library that has not migrated yet, so both belong to phase E rather than ahead
+of it; the pairwise sweep's own artifact is committed and waiting for them
+(`tests/data/break/linebreak-pairs.txt`). The ICU differential from C's gate
+column is also absent: it needs a container image, and the image pattern in
+`notes/suite/CONTAINERS.md` is another session's work in progress. The CPython
+differential that does exist is `tools/oracle/unicodedata_diff.py`, and §12.4
+records what it found.
+
+The suite-level `check-ucd-pins.sh` is built, in the workspace rather than
+here: three libraries pin a UCD version today and the point of the check is
+that they agree.
 
 | Phase | Work | Size | Gate | Unlocks |
 | --- | --- | --- | --- | --- |
