@@ -84,6 +84,13 @@ PROBE = {
 }
 PROBE["python-next"] = PROBE["python"]
 
+# ICU's probe is a program compiled *into* its image, reporting
+# U_UNICODE_VERSION from the headers the driver is compiled against - so the pin
+# is checked against the same tables that will answer the questions. The
+# alternative was parsing `icuinfo`'s XML, which puts a sed script between the
+# check and the fact it checks.
+PROBE["icu"] = (["icu-version"], "ICU ")
+
 _pins = None
 _cache = {}
 

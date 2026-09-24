@@ -968,10 +968,48 @@ check-oracle-unicodedata-strict: ucd-present $(TEST_EXECUTABLES)
 		python3 tools/oracle/oracle_run.py python -- \
 		tools/oracle/unicodedata_diff.py --strict
 
-check-oracles: ## Run every differential
-check-oracles: check-oracle-unicodedata check-oracle-unicodedata-strict
+check-oracle-icu: ## Compare all four segmentations against ICU
+# The only second opinion there is on segmentation: `unicodedata` exposes no
+# boundary function, so UAX #29 and UAX #14 have had nothing but the
+# Consortium's conformance files - which are tables of *pairs*, and say nothing
+# about a boundary four characters into a string of nine. This runs random
+# strings over a pool stratified by every value of every break property.
+#
+# The reference is ICU 78.3, which carries Unicode 17.0 exactly, so there is no
+# advisory mode here: a difference is either one of the two documented
+# divergences or a defect, and the tool decides which offset by offset.
+#
+# ICU_CASES is the strings per break kind. The default is a gate's worth; a
+# hunt is `make check-oracle-icu ICU_CASES=20000 ICU_SEED=$$RANDOM`, and a seed
+# that finds something goes in a regression test rather than in the default.
+ICU_CASES ?= 2000
+ICU_SEED ?= 20260924
+# Both modes, because neither found both divergences on its own: the random pool
+# samples characters and reaches long-context rules, and --pairwise is exhaustive
+# over ordered class pairs but takes one representative per class, so a character
+# its own class treats specially is invisible to it. The iteration marks came
+# from the first and IN x IN from the second.
+check-oracle-icu: ucd-present $(TEST_EXECUTABLES)
+	$(call run-oracle,icu,tools/oracle/icu_break_diff.py \
+		--cases $(ICU_CASES) --seed $(ICU_SEED))
+	$(call run-oracle,icu,tools/oracle/icu_break_diff.py --pairwise)
 
-.PHONY: check-oracle-unicodedata check-oracle-unicodedata-strict check-oracles
+oracle-images: ## Build the oracle images that are built here rather than pulled
+# Only `icu` is built here; the CPython pins are stock images pulled by digest.
+# Separate from the gate because it takes minutes and a gate should not: ICU is
+# compiled from source, for the reason containers/icu/Dockerfile gives.
+oracle-images:
+	@docker build -t $$(awk -F'\t' '/^icu\t/ {print $$2}' \
+		tools/oracle/containers/IMAGES) \
+		-f tools/oracle/containers/icu/Dockerfile \
+		tools/oracle/containers/icu
+
+check-oracles: ## Run every differential
+check-oracles: check-oracle-unicodedata check-oracle-unicodedata-strict \
+	check-oracle-icu
+
+.PHONY: check-oracle-unicodedata check-oracle-unicodedata-strict
+.PHONY: check-oracle-icu check-oracles oracle-images
 
 ####################################################################
 # Tier layering

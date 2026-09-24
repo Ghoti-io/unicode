@@ -74,8 +74,7 @@ typedef enum {
 } GUNI_BreakKind;
 
 /**
- * @brief How UAX #14's rule LB1 resolves `CJ`, which is what CSS's
- * `line-break` property selects.
+ * @brief How UAX #14's rule LB1 resolves `CJ`.
  *
  * LB1 says `CJ` becomes `NS` **or `ID`, at the implementation's choice**, and
  * that choice is a document's to make: `strict` keeps small kana with the
@@ -84,11 +83,28 @@ typedef enum {
  * STRICT is zero, and not because it is stricter: it is the Standard's own
  * worked example and `regex`'s existing behaviour, so it is the answer that
  * changes nothing for a caller who does not choose (design.md section 15.7).
+ *
+ * **These are LB1's resolutions, and they are named after the CSS `line-break`
+ * values that select them - they are not the whole of those values.** CSS Text's
+ * `line-break` carries typographic tailorings beyond LB1, and `loose` carries
+ * two this library does not apply: a break is permitted *before* the six
+ * Japanese iteration marks (U+3005, U+303B, U+309D, U+309E, U+30FD, U+30FE),
+ * and between two characters of Line_Break class `IN`, where LB22 forbids one
+ * unconditionally. Both were found by the ICU differential
+ * (`make check-oracle-icu`) against a header that used to say "CSS `loose`"
+ * without qualification, and both are measured and complete rather than read
+ * off the specification: ICU 78.3 was asked about all 1,114,112 codepoints.
+ *
+ * A caller that needs CSS `loose` in full needs those two tailorings on top of
+ * `GUNI_LINE_BREAK_LOOSE`. Where they would belong if this library grew them is
+ * `GUNI_BreakProvider` (design.md section 9), which is the seam locale and
+ * typographic preferences arrive through - the LB1 axis is deliberately about
+ * the one choice the Standard leaves to the implementation.
  */
 typedef enum {
-  GUNI_LINE_BREAK_STRICT = 0, ///< `CJ` resolves to `NS`. CSS `strict`.
-  GUNI_LINE_BREAK_NORMAL,     ///< `CJ` resolves to `ID`. CSS `normal`.
-  GUNI_LINE_BREAK_LOOSE       ///< `CJ` resolves to `ID`. CSS `loose`.
+  GUNI_LINE_BREAK_STRICT = 0, ///< `CJ` resolves to `NS`. CSS `strict` selects it.
+  GUNI_LINE_BREAK_NORMAL,     ///< `CJ` resolves to `ID`. CSS `normal` selects it.
+  GUNI_LINE_BREAK_LOOSE       ///< `CJ` resolves to `ID`. CSS `loose` selects it.
 } GUNI_LineBreakTailoring;
 
 /**

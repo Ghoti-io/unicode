@@ -864,7 +864,36 @@ Two things are specific to Unicode oracles:
   lives in the script rather than in somebody's memory.
 - **The ICU driver builds inside its image** against the image's ICU alone,
   as `regex`'s `pcre2_match` builds against pcre2 alone, so that the reference
-  cannot reach the implementation it answers for.
+  cannot reach the implementation it answers for. **Built**: ICU 78.3, which
+  carries Unicode 17.0 exactly, so there is no advisory mode - one pin, and it
+  matches. It is built from the release tarball rather than installed from
+  Debian sid, which also has 78.3: sid moves continuously, an exact apt pin into
+  it expires sooner than a stable one would, and this is the one gate whose
+  disagreement means a defect. What is pinned is the base by digest and the
+  tarball by the SHA-512 the Consortium publishes beside the release - the bytes
+  rather than a tag - plus the run-time version check, per CONTAINERS.md §2.6.
+
+  **Segmentation had no second opinion at all before this.** `unicodedata`
+  exposes no boundary function, so UAX #29 and UAX #14 were gated by the
+  conformance files alone, and those are tables of *pairs*: they say nothing
+  about a boundary four characters into a string of nine, which is where GB9c's
+  prepend context, WB4's ignore rule, LB25's number sequences and GB12/GB13's
+  regional-indicator parity live.
+
+  Two modes, because **neither found both divergences**. Random strings over a
+  pool stratified by every value of every break property sample *characters* and
+  reach long-context rules; `--pairwise` is exhaustive over ordered class pairs
+  but takes one representative per class, so a character its own class treats
+  specially is invisible to it. The first mode found the iteration marks, the
+  second found `IN × IN`, and an exhaustive sweep of all 1,114,112 codepoints in
+  two contexts under all three tailorings was what established that the list is
+  complete. A probe over run *endpoints* was tried first and missed U+309D,
+  which sits in a run's interior - the same blindness one level down.
+
+  Differences are **explained, never excluded**, and offset by offset rather
+  than case by case, so a case carrying one known divergence and one defect is
+  not filed under the divergence. The characters that diverge stay in the pool,
+  so a difference of any other shape at them still fails.
 
 ### 12.5 Fuzzing
 

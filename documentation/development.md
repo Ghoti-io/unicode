@@ -112,8 +112,13 @@ a container engine and the fetched UCD - so they are targets of their own:
 ```bash
 make check-oracle-unicodedata          # a released CPython, UCD 16.0: advisory
 make check-oracle-unicodedata-strict   # one on UCD 17.0: this one can fail
-make check-oracles                     # both
+make check-oracle-icu                  # ICU 78.3, UCD 17.0: segmentation
+make check-oracles                     # all three
+make oracle-images                     # build the images that are built here
 ```
+
+`oracle-images` is separate because building ICU from source takes minutes and a
+gate should not. The CPython pins are stock images pulled on demand.
 
 **The reference is pinned, and that is the whole point.** This differential used
 to `import unicodedata` in its own process, which meant "the reference" was
@@ -143,6 +148,66 @@ To ask the gating pin's questions of the other pin:
 ```bash
 GHOTI_ORACLE_ALIAS=python=python-next make check-oracle-unicodedata
 ```
+
+## The ICU differential, and why segmentation needed one
+
+`unicodedata` exposes no boundary function, so until this existed UAX #29 and
+UAX #14 had **nothing but the Consortium's conformance files** answering for
+them - and those are tables of *pairs*. They say nothing about a boundary four
+characters into a string of nine, which is where GB9c's prepend context, WB4's
+ignore rule, LB25's number sequences and the regional-indicator pair count in
+GB12/GB13 actually live. An implementation can pass every pair and still get
+those wrong.
+
+`tools/oracle/icu_break_diff.py` runs strings over a pool **stratified by every
+value of every break property**, read out of this library's own sweep dumps: a
+uniform sample of the codespace is 73% unassigned and would spend its budget on
+`XX`. Two modes, and they see different things:
+
+```bash
+make check-oracle-icu                             # random strings, seeded
+tools/oracle/icu_break_diff.py --pairwise         # every ordered class pair
+make check-oracle-icu ICU_CASES=20000 ICU_SEED=$RANDOM   # a hunt
+```
+
+The random mode samples characters and reaches long-context rules; `--pairwise`
+is exhaustive over class *pairs* but uses one representative per class, so a
+character its own class treats specially is invisible to it. Both were needed to
+find the two divergences below: the first surfaced in random strings, the second
+in the pairwise sweep, and neither mode found both.
+
+Both sides of the comparison speak one protocol - one request per line, one
+framed answer per line, **the answer echoing the request** - so `testSegment`
+under `GUNI_BREAK_DUMP=stdin` and `icu_break.cpp` are interchangeable and a
+stray line on stdout cannot shift the answers and be absorbed. That is not
+hypothetical: the first run of this reported "asked 1050 and 34 answers arrived"
+because `GUNI_BREAK_DUMP` was missing from the environment and `testSegment` had
+run its gtest suite instead.
+
+**`icu_break.cpp` links only ICU**, and is compiled inside its image on each
+run. An oracle that could reach the implementation it answers for is not an
+oracle; `regex`'s `pcre2_match` is the same shape.
+
+### The two divergences, and what they are not
+
+Differences are **explained, never excluded** - and offset by offset, not case by
+case, so a case carrying one known divergence and one defect is not filed under
+the divergence. Nothing is dropped from the pool, so a difference of any *other*
+shape at those same characters still fails the gate.
+
+1. **`GUNI_LINE_BREAK_LOOSE` is UAX #14's LB1, not CSS's `line-break: loose`.**
+   CSS's `loose` selects LB1's `CJ`-to-`ID` resolution *and* adds tailorings of
+   its own. ICU implements those; this library implements LB1. So ICU's `loose`
+   allows breaks this library does not, and the header used to call the enum
+   member "CSS `loose`", which overclaimed.
+2. **ICU segments some scripts with a dictionary.** Inside a run of Han,
+   Hiragana, Katakana, Thai, Lao, Khmer or Myanmar, ICU is answering a different
+   question: it joins two Han characters into one word where WB999 breaks them,
+   and splits supplementary-plane Katakana where WB13 joins it. This library
+   implements the rules and offers the dictionary as a provider seam instead
+   (design.md section 9).
+
+Everything else agrees exactly - all four algorithms, all three tailorings.
 
 It reads the library's answers out of the test binaries' dump modes -
 `GUNI_SWEEP_DUMP=<property>` on `testSweep`, `GUNI_NAME_DUMP=1` on `testName` -

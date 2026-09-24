@@ -39,6 +39,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <iostream>
 #include <map>
 #include <set>
 #include <string>
@@ -608,9 +609,199 @@ TEST(Segment, AnSaRunBeginningAfterOtherTextIsStillARun) {
   EXPECT_EQ(found, std::vector<size_t>({2, 3, 4}));
 }
 
+TEST(Segment, LooseIsLb1AndNotTheWholeOfCssLoose) {
+  /* What the ICU differential found, recorded so that a change to it is
+   * deliberate. `make check-oracle-icu` compares this library against ICU 78.3
+   * and agrees everywhere except two places, and both are CSS Text tailorings
+   * that sit on top of UAX #14's LB1 rather than inside it:
+   *
+   *  1. CSS `loose` permits a break *before* the six Japanese iteration marks.
+   *     UAX #14 does not: they are Line_Break NS, and LB21's `x NS` forbids it.
+   *  2. CSS `loose` permits a break *between two* Inseparable characters. LB22's
+   *     `x IN` forbids it unconditionally.
+   *
+   * This test asserts this library's answer, which is the Standard's. If either
+   * of these is ever implemented - through GUNI_BreakProvider, per design.md
+   * section 9 - this test is the one that has to change, and the differential's
+   * explanation table with it. The differential cannot catch a *regression*
+   * here, because a change in this direction would make us agree with ICU and
+   * its gate would go quiet; only an assertion on our own answer can. */
+  static const uint32_t marks[] = {
+      0x3005, 0x303B, 0x309D, 0x309E, 0x30FD, 0x30FE};
+  for (const uint32_t mark : marks) {
+    const std::vector<uint32_t> text = {0x4E00, mark, 0x4E00};
+    for (int which = 0; which < 3; ++which) {
+      const GUNI_BreakOptions options = options_for(GUNI_BREAK_LINE,
+          static_cast<GUNI_LineBreakTailoring>(which));
+      EXPECT_FALSE(guni_break_at_codepoints(&options, text.data(), text.size(), 1))
+          << "U+" << std::hex << mark
+          << " is NS, and LB21 forbids a break before it in every tailoring"
+          << " - including loose, where CSS would permit one";
+    }
+  }
+
+  /* U+2026 HORIZONTAL ELLIPSIS and U+22EF MIDLINE HORIZONTAL ELLIPSIS are both
+   * Line_Break IN. The neighbouring pairs are asserted too, because the
+   * divergence is between two Inseparables and not "before an Inseparable", and
+   * a test that did not pin that down would pass against the wrong rule. */
+  ASSERT_EQ(guni_line_break(0x2026), GUNI_LB_IN);
+  ASSERT_EQ(guni_line_break(0x22EF), GUNI_LB_IN);
+  for (int which = 0; which < 3; ++which) {
+    const GUNI_BreakOptions options = options_for(GUNI_BREAK_LINE,
+        static_cast<GUNI_LineBreakTailoring>(which));
+    const std::vector<uint32_t> in_in = {0x2026, 0x22EF};
+    EXPECT_FALSE(guni_break_at_codepoints(&options, in_in.data(), in_in.size(), 1))
+        << "LB22 forbids a break before IN in every tailoring";
+    const std::vector<uint32_t> in_id = {0x2026, 0x4E00};
+    EXPECT_TRUE(guni_break_at_codepoints(&options, in_id.data(), in_id.size(), 1))
+        << "IN x ID does break, and ICU agrees in all three tailorings";
+    const std::vector<uint32_t> id_in = {0x4E00, 0x2026};
+    EXPECT_FALSE(guni_break_at_codepoints(&options, id_in.data(), id_in.size(), 1))
+        << "ID x IN does not, and ICU agrees in all three tailorings";
+  }
+}
+
+/**
+ * The library's side of the ICU differential's protocol, reached with
+ * GUNI_BREAK_DUMP=stdin.
+ *
+ * The same reasoning as testSweep's GUNI_SWEEP_DUMP: a differential wants this
+ * library's answers as text, and a test binary already links the library, so a
+ * driver of its own would be a second thing to keep correct. One request per
+ * line, one answer per line, one process for the batch.
+ *
+ *   request   <kind>\t<hex of the UTF-8 bytes>[\t<tailoring>]
+ *   answer    <kind>\t<hex>\t<space-separated byte offsets>
+ *
+ * **The answer echoes the request**, which is the framing. One answer per
+ * request would let a stray line on stdout shift every answer after it by one
+ * and be absorbed silently - and there is a live way to emit one, since the
+ * container engine on this machine writes a banner. An echo the parent checks
+ * cannot absorb it.
+ *
+ * Offsets are byte offsets into the UTF-8, position 0 excluded and the length
+ * included, which is what guni_break_all() reports. ICU's iterator reports 0
+ * as a boundary and its offsets are UTF-16 code units, so its driver converts;
+ * the two sides agree on this format and not on the format either library
+ * finds natural.
+ */
+int dump_from_stdin() {
+  static const struct {
+    const char * name;
+    GUNI_BreakKind kind;
+  } kinds[] = {
+      {"grapheme", GUNI_BREAK_GRAPHEME},
+      {"word", GUNI_BREAK_WORD},
+      {"sentence", GUNI_BREAK_SENTENCE},
+      {"line", GUNI_BREAK_LINE},
+  };
+  static const struct {
+    const char * name;
+    GUNI_LineBreakTailoring tailoring;
+  } tailorings[] = {
+      {"strict", GUNI_LINE_BREAK_STRICT},
+      {"normal", GUNI_LINE_BREAK_NORMAL},
+      {"loose", GUNI_LINE_BREAK_LOOSE},
+      /* What a caller who does not choose gets, which for this library is the
+       * zero value and therefore strict. The ICU driver answers the same
+       * request from its *unqualified* root locale, so comparing the two
+       * checks that the two libraries' defaults agree - which is the question
+       * a consumer moving from one to the other actually has. ICU's root
+       * measures as strict, and that was measured rather than assumed. */
+      {"default", GUNI_LINE_BREAK_STRICT},
+  };
+
+  std::string line;
+  while (std::getline(std::cin, line)) {
+    if (line.empty()) {
+      continue;
+    }
+    const size_t first = line.find('\t');
+    if (first == std::string::npos) {
+      std::fprintf(stderr, "guni break dump: no tab in %s\n", line.c_str());
+      return 2;
+    }
+    const size_t second = line.find('\t', first + 1);
+    const std::string kind_name = line.substr(0, first);
+    const std::string hex = (second == std::string::npos)
+        ? line.substr(first + 1)
+        : line.substr(first + 1, second - first - 1);
+    const std::string tailoring_name = (second == std::string::npos)
+        ? std::string("strict")
+        : line.substr(second + 1);
+
+    GUNI_BreakKind kind = GUNI_BREAK_KIND_COUNT;
+    for (const auto & entry : kinds) {
+      if (kind_name == entry.name) {
+        kind = entry.kind;
+      }
+    }
+    GUNI_LineBreakTailoring tailoring = GUNI_LINE_BREAK_STRICT;
+    bool known_tailoring = false;
+    for (const auto & entry : tailorings) {
+      if (tailoring_name == entry.name) {
+        tailoring = entry.tailoring;
+        known_tailoring = true;
+      }
+    }
+    if (kind == GUNI_BREAK_KIND_COUNT || !known_tailoring) {
+      std::fprintf(stderr, "guni break dump: %s/%s is not a request\n",
+          kind_name.c_str(), tailoring_name.c_str());
+      return 2;
+    }
+    if (hex.size() % 2 != 0) {
+      std::fprintf(stderr, "guni break dump: odd hex length\n");
+      return 2;
+    }
+
+    std::string text;
+    for (size_t at = 0; at + 1 < hex.size(); at += 2) {
+      text.push_back(static_cast<char>(
+          std::stoul(hex.substr(at, 2), nullptr, 16)));
+    }
+
+    const GUNI_BreakOptions options = options_for(kind, tailoring);
+    size_t needed = 0;
+    GUNI_Result result = guni_break_all(&options, text.data(), text.size(),
+        nullptr, 0, &needed);
+    if (result != GUNI_OK && result != GUNI_ERR_LIMIT) {
+      /* Not silently an empty answer: a refusal is a thing the parent has to
+       * be able to see, and an empty boundary list is a valid answer for the
+       * empty string. */
+      std::printf("%s\t%s\trefused %s\n", kind_name.c_str(), hex.c_str(),
+          guni_result_string(result));
+      continue;
+    }
+    std::vector<size_t> found(needed);
+    size_t written = 0;
+    result = guni_break_all(&options, text.data(), text.size(),
+        found.data(), found.size(), &written);
+    if (result != GUNI_OK) {
+      std::printf("%s\t%s\trefused %s\n", kind_name.c_str(), hex.c_str(),
+          guni_result_string(result));
+      continue;
+    }
+    std::string answer;
+    for (size_t at = 0; at < written; ++at) {
+      char number[32];
+      std::snprintf(number, sizeof(number), "%s%zu", at ? " " : "",
+          found[at]);
+      answer += number;
+    }
+    std::printf("%s\t%s\t%s\n", kind_name.c_str(), hex.c_str(),
+        answer.c_str());
+  }
+  std::fflush(stdout);
+  return 0;
+}
+
 } // namespace
 
 int main(int argc, char ** argv) {
+  const char * dump = std::getenv("GUNI_BREAK_DUMP");
+  if (dump != nullptr && std::strcmp(dump, "stdin") == 0) {
+    return dump_from_stdin();
+  }
   ::testing::InitGoogleTest(&argc, argv);
   return RUN_ALL_TESTS();
 }
