@@ -999,17 +999,55 @@ oracle-images: ## Build the oracle images that are built here rather than pulled
 # Separate from the gate because it takes minutes and a gate should not: ICU is
 # compiled from source, for the reason containers/icu/Dockerfile gives.
 oracle-images:
-	@docker build -t $$(awk -F'\t' '/^icu\t/ {print $$2}' \
-		tools/oracle/containers/IMAGES) \
+	@tag=$$(awk -F'\t' '/^icu\t/ {print $$2}' tools/oracle/containers/IMAGES); \
+	case "$$tag" in \
+		*$(ORACLE_IMAGE_PREFIX)*) ;; \
+		*) printf "IMAGES names the icu image %s, which is not under the\n" "$$tag" >&2; \
+		   printf "convention's prefix %s (CONTAINERS.md 6.1). A library that\n" "$(ORACLE_IMAGE_PREFIX)" >&2; \
+		   printf "names its image outside the prefix is one oracle-clean will\n" >&2; \
+		   printf "refuse to remove, so the two must agree.\n" >&2; \
+		   exit 1 ;; \
+	esac; \
+	docker build -t "$$tag" \
 		-f tools/oracle/containers/icu/Dockerfile \
 		tools/oracle/containers/icu
+
+# The naming convention is notes/suite/CONTAINERS.md section 6.1:
+#
+#   ghoti-<library>-oracle-<reference>:<version>   a library's oracle images
+#   ghoti-<purpose>:<base-or-version>              suite-wide toolchains
+#
+# Derived rather than written out, so that this target and the image it builds
+# cannot drift apart, and so a reader can see the shape.
+ORACLE_IMAGE_PREFIX := ghoti-$(PROJECT)-oracle-
+
+oracle-clean: ## Remove the oracle images built here for this library
+# Section 6.4 records that there was no cleanup story at all - 3.34 GB built and
+# 1.08 GB pulled across the suite, with nothing saying which is safe to remove.
+# The division is not a judgement call:
+#
+#   built here   always safe. Reproducible from a committed Dockerfile with
+#                `make oracle-images`, and nothing outside this library uses it.
+#   stock        never ours to delete. Re-tagging or removing python:3.14-slim
+#                would break the digest pin that is its whole guarantee, and
+#                another project on this machine may be pinned to it. This
+#                machine also carries home-assistant, espressif/idf,
+#                nmos-testing, node-red and mosquitto.
+#
+# Per library, so that two sessions cleaning up cannot reach each other's
+# images. ORACLE_CLEAN_MATCH exists to be narrowed in a test; widening it will
+# not reach a stock image, because the guard below refuses anything that is not
+# under this library's own prefix rather than trusting the pattern.
+ORACLE_CLEAN_MATCH ?= $(ORACLE_IMAGE_PREFIX)
+oracle-clean:
+	@found=$$(docker images --format '{{.Repository}}:{{.Tag}}' 2>/dev/null 		| grep -F '$(ORACLE_CLEAN_MATCH)' 		| grep -E '^(localhost/)?$(ORACLE_IMAGE_PREFIX)' || true); 	if [ -z "$$found" ]; then 		printf "No %s* images are present.\n" "$(ORACLE_IMAGE_PREFIX)"; 	else 		for image in $$found; do 			printf "  removing %s\n" "$$image"; 			docker rmi "$$image" >/dev/null || exit 1; 		done; 	fi; 	printf "\nThe stock images are left, deliberately: they are pinned by\n"; 	printf "digest in tools/oracle/containers/IMAGES, that digest is the whole\n"; 	printf "guarantee, and another project on this machine may be pinned to the\n"; 	printf "same bytes. \"docker images | grep '^localhost/ghoti-'\" is what the\n"; 	printf "libraries built; the IMAGES files are what they pulled.\n"; 	printf "\nRebuild with \"make oracle-images\".\n"
 
 check-oracles: ## Run every differential
 check-oracles: check-oracle-unicodedata check-oracle-unicodedata-strict \
 	check-oracle-icu
 
 .PHONY: check-oracle-unicodedata check-oracle-unicodedata-strict
-.PHONY: check-oracle-icu check-oracles oracle-images
+.PHONY: check-oracle-icu check-oracles oracle-images oracle-clean
 
 ####################################################################
 # Tier layering
