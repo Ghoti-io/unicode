@@ -1104,10 +1104,13 @@ of it; the pairwise sweep's own artifact is committed and waiting for them
 `make check-oracle-unicodedata` against a released CPython and
 `make check-oracle-unicodedata-strict` against one carrying this library's own
 UCD version, where 7,947,413 comparisons over all 1,114,112 codepoints leave no
-difference at all. The ICU differential from C's gate column is still absent and
-is now the only thing the image pattern was blocking: it wants a driver
-compiled *inside* its image, which is the `pcre2` shape in
-`notes/suite/CONTAINERS.md` §2.4 rather than the stock-image shape landed here.
+difference at all. **The ICU differential from C's gate column is built too**, which was the last
+thing the image pattern was blocking: `tools/oracle/icu_break.cpp` compiled
+*inside* its image against ICU 78.3 alone - the `pcre2` shape in
+`notes/suite/CONTAINERS.md` §2.4. It gave segmentation its first second opinion
+of any kind, and it earned itself on the first run: `GUNI_LINE_BREAK_LOOSE`
+implements UAX #14's LB1 and the header claimed CSS's `loose`, which carries two
+tailorings beyond it (§12.4). Everything else agrees exactly.
 
 The suite-level `check-ucd-pins.sh` is built, in the workspace rather than
 here: three libraries pin a UCD version today and the point of the check is
