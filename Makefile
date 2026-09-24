@@ -809,6 +809,90 @@ check-stamps: ## Fail if a compile rule names no flags stamp, or a stamp omits a
 # which is generic; the rest of that script is model's own lists.
 	@python3 tools/check-stamps.py
 
+
+####################################################################
+# The Unicode Character Database
+####################################################################
+#
+# documentation/design.md section 5. The UCD itself is fetched and not
+# committed; the tables generated from it are committed, and so are the
+# conformance files the tests run against. Three targets, and which of them
+# needs the fetch is the whole design:
+#
+#   gen-ucd-tables       regenerate the committed tables      needs the UCD
+#   check-ucd-tables     fail if a committed table is stale   needs the UCD
+#   install-conformance  copy the conformance files in        needs the UCD
+#
+# and `make test` needs none of them, because what it checks the tables
+# against is the committed sweep fixture (tests/data/sweep/), which a second,
+# independent parser produced. An edited table fails testSweep on a fresh
+# clone with no network; a generator changed without regenerating fails
+# check-ucd-tables wherever the UCD is present. That is why
+# check-ucd-tables is deliberately NOT in TEST_GATES: a gate that skips when
+# its data is absent is the mistake design.md section 2 M4 names, and the
+# alternative to skipping is not "fail on every clone", it is "have a
+# different gate cover it".
+
+UCD_VERSION := $(shell cat tools/ucd/UCD_VERSION)
+UCD_DIR := third_party/ucd/$(UCD_VERSION)
+CONFORMANCE_DIR := tests/data/ucd/$(UCD_VERSION)
+
+# Every file tests/conformance/ reads. Committed, so that no gate can skip.
+CONFORMANCE_FILES := GraphemeBreakTest.txt WordBreakTest.txt \
+	SentenceBreakTest.txt LineBreakTest.txt NormalizationTest.txt \
+	BidiTest.txt BidiCharacterTest.txt
+
+ucd-present:
+	@if [ ! -d $(UCD_DIR) ]; then \
+		printf "\033[0;31m\n### The UCD is not here ###\033[0m\n" >&2; \
+		printf "\n%s does not exist. Run:\n\n    tools/ucd/fetch.sh\n\n" "$(UCD_DIR)" >&2; \
+		printf "The UCD is 29 MB of somebody else's data and is not committed;\n" >&2; \
+		printf "the tables generated from it are. See documentation/design.md\n" >&2; \
+		printf "section 5.1. There is no fallback and no skip: a check that\n" >&2; \
+		printf "passes when it could not run is worse than one that fails.\n" >&2; \
+		exit 1; \
+	fi
+
+gen-ucd-tables: ## Regenerate the committed Unicode tables from the UCD
+gen-ucd-tables: ucd-present
+	@python3 tools/ucd/gen_tables.py
+	@python3 tools/ucd/gen_sweep.py
+	@printf "\033[0;32mTables and sweep fixture regenerated. Read the diff.\033[0m\n"
+
+check-ucd-tables: ## Fail if a committed table differs from what the generator emits
+check-ucd-tables: ucd-present
+	@rm -rf $(BUILD_DIR)/ucd-check
+	@mkdir -p $(BUILD_DIR)/ucd-check
+	@python3 tools/ucd/gen_tables.py --out $(BUILD_DIR)/ucd-check
+	@python3 tools/ucd/gen_sweep.py --out $(BUILD_DIR)/ucd-check
+	@stale=""; \
+	for f in $$(cd $(BUILD_DIR)/ucd-check && find . -type f | sort); do \
+		if ! cmp -s "$(BUILD_DIR)/ucd-check/$$f" "$$f"; then \
+			stale="$$stale $$f"; \
+		fi; \
+	done; \
+	if [ -n "$$stale" ]; then \
+		printf "\033[0;31m\n### A committed Unicode table is not what the generator emits ###\033[0m\n" >&2; \
+		for f in $$stale; do printf "  %s\n" "$$f" >&2; done; \
+		printf "\nRun \"make gen-ucd-tables\" and read the diff. On a version bump the\n" >&2; \
+		printf "diff is the review artifact; otherwise it is a table someone edited\n" >&2; \
+		printf "by hand, or a generator change that was never run.\n" >&2; \
+		exit 1; \
+	fi
+	@printf "\033[0;32mEvery committed table is what the generator emits.\033[0m\n"
+
+install-conformance: ## Copy the UCD conformance files into tests/data (they are committed)
+install-conformance: ucd-present
+	@mkdir -p $(CONFORMANCE_DIR)
+	@for f in $(CONFORMANCE_FILES); do \
+		cp $(UCD_DIR)/$$f $(CONFORMANCE_DIR)/$$f; \
+		printf "  %s\n" "$(CONFORMANCE_DIR)/$$f"; \
+	done
+	@printf "\033[0;32mConformance files installed. Commit them: a gate that can\n"
+	@printf "skip for want of data is not a gate.\033[0m\n"
+
+.PHONY: ucd-present gen-ucd-tables check-ucd-tables install-conformance
+
 ####################################################################
 # Tier layering
 ####################################################################
@@ -831,6 +915,7 @@ TIER0_FILES := include/ghoti.io/unicode/core.h include/ghoti.io/unicode/utf.h \
 	include/ghoti.io/unicode/bidi.h include/ghoti.io/unicode/unicode.h \
 	include/ghoti.io/unicode/allocator.h \
 	src/core/*.c src/core/*.h src/utf/*.c src/utf/*.h src/char/*.c src/char/*.h \
+	src/char/tables/*.c src/char/tables/*.h \
 	src/set/*.c src/set/*.h src/script/*.c src/script/*.h src/case/*.c src/case/*.h \
 	src/norm/*.c src/norm/*.h src/break/*.c src/break/*.h src/bidi/*.c src/bidi/*.h \
 	src/unicode.c
@@ -1266,12 +1351,17 @@ fuzz-run-$2: $$(FUZZ_APP_DIR)/$1
 		-max_total_time=$$(FUZZ_TIME) -print_final_stats=1
 endef
 
-# No harness yet. Each arrives as $(eval $(call fuzz-rule,fuzz_<name>,<name>))
-# with a seed in tests/fuzz/corpus/<name>/, per documentation/development.md.
+# One rule per harness, with its seeds in tests/fuzz/corpus/<name>/*.seed.
+# design.md section 12.5 lists the harnesses this library wants; each arrives
+# with the module it fuzzes, because a harness for code that does not exist
+# yet is a line in a Makefile pretending to be coverage.
+$(eval $(call fuzz-rule,fuzz_utf,utf))
+
+FUZZ_NAMES := utf
 
 fuzz: ## Build and run every fuzzer for $(FUZZ_TIME) seconds each
-fuzz:
-	@printf "fuzz: no harnesses yet; see documentation/design.md and development.md\n"
+fuzz: $(addprefix fuzz-run-,$(FUZZ_NAMES))
+	@printf "\n\033[0;32mFuzzed: $(FUZZ_NAMES), $(FUZZ_TIME)s each.\033[0m\n"
 
 fuzz-clean: ## Remove the fuzz build (keeps the corpus)
 	-@rm -rf $(FUZZ_DIR)

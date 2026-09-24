@@ -1,10 +1,12 @@
 # The design of ghoti.io-unicode
 
-**Status:** design; the scaffold is built and nothing else is. This page
+**Status:** phase A is built - `core.h`, `utf.h`, `char.h`, `set.h`, the
+generator, and the exhaustive sweep. Everything else is design. This page
 says what will exist and why, so that the code can be judged against it
 rather than the other way round. A change of mind lands here first, in the
 same commit as the code that needs it (`CONVENTIONS.md` §9), and §16 marks
-what is built. The workspace's `notes/suite/UNICODE-LIBRARY.md` records the
+what is built. §17 lists what the code decided differently from this page,
+and why. The workspace's `notes/suite/UNICODE-LIBRARY.md` records the
 decision to build this library and the inventory that motivated it.
 
 `unicode` is the suite's Unicode library: the Character Database as generated
@@ -152,17 +154,36 @@ ranges to build a class from. A shaper asks *"what is the script of U+03B1"* a
 million times a second and wants a constant-time answer. These are the same
 data in two layouts:
 
-- **`char.h` is point-oriented.** Each property is a function
-  `guni_<property>(uint32_t)` over a two-stage trie generated for it, three
-  dependent loads and no branch on the fast path.
-- **`set.h` is set-oriented.** Each property value is available as a sorted
-  array of `GUNI_Range { uint32_t first, last; }`, which is what `regex`'s
-  `GRX_CharRange` is today.
+- **`char.h` is point-oriented.** Every property is a field of one record,
+  and one two-stage trie maps a codepoint to it: `cp >> 6` indexes stage 1,
+  the low six bits index stage 2, and identical 64-codepoint blocks are
+  shared. Three dependent loads, no branch. Measured at UCD 17.0.0: 1,114,112
+  codepoints have **2,374 distinct records**, because properties correlate -
+  a codepoint's script very nearly determines its bidi class, its line-break
+  class and its Indic categories. Storing the tuple once is what makes every
+  property cost the same lookup and keeps the whole thing to 316 KB of
+  `.rodata` for 97 properties.
+- **`set.h` is set-oriented**, and **materialises** its ranges rather than
+  reading a committed array per value. The generator emits one more table
+  from the same map: the **8,035 maximal runs** over which the record is
+  constant. `guni_set_ranges()` filters those runs, merges the ones that
+  touch, and follows the output contract of §4.5 - ask with a cap of 0 to
+  learn the count, then ask again. A regex compiler pays one walk of 8,035
+  entries per property per pattern.
 
-Both are emitted by `gen_tables.py` from the same parsed UCD, and a test walks
-all 1,114,112 codepoints asserting that the trie's answer and the range list's
-membership agree for every property. That test is what makes it safe to keep
-two layouts: they cannot drift because they are not two sources.
+This is a departure from the first draft of this section, which specified a
+committed sorted `GUNI_Range` array per property value and a test to prove the
+two layouts agreed. Materialising is better on both counts: the range arrays
+would have been about 320 KB of a second copy of the data - which is M1 in
+miniature - and "the point query and the set enumeration cannot disagree
+because they are not two sources" became true of the construction rather than
+a claim resting on a test.
+
+The test still exists, because a claim that costs nothing to check is worth
+checking: `tests/unit/test_sweep.cpp` walks all 1,114,112 codepoints asserting
+that the trie's record is the record the runs table names, that every run is
+maximal, and that every range `set.h` reports contains its endpoints and not
+the codepoints either side of them.
 
 Segmentation likewise has both shapes: `guni_break_at()` answers one position
 (the `regex` shape, where the engine is already at an offset and asks whether
@@ -259,9 +280,21 @@ tracked Unicode 11.
 
 Regenerates every table into a scratch directory and fails when any committed
 file differs byte for byte, as `regex`'s `check-unicode-tables` and `text`'s
-equivalent do today. It is in `TEST_GATES`. This is the gate that catches an
-edited table, a generator change without a regeneration, and - on upgrade - is
-the thing that produces the diff a reviewer reads.
+equivalent do today. It catches a generator changed without a regeneration, a
+table edited by hand, and - on upgrade - produces the diff a reviewer reads.
+
+**It is not in `TEST_GATES`**, which is a departure from this section's first
+draft. It cannot be: it needs `third_party/ucd/`, which is fetched and not
+committed, so in `TEST_GATES` it would either fail on every fresh clone or
+skip when its data is absent - and a gate that skips when its data is absent
+is M4, the mistake this library was partly built to stop repeating. The
+resolution is not to weaken it but to have a second gate cover the same
+ground from committed data: **`make test` checks the tables against
+`tests/data/sweep/<version>.sums`** (§12.1), which a second, independent
+parser produced. An edited table therefore fails on a clone with no network
+and no Python; `check-ucd-tables` runs wherever the UCD is present and is
+required before a release. Without the UCD it fails, loudly, naming
+`tools/ucd/fetch.sh`.
 
 ### 5.3 The generator is the product
 
@@ -300,9 +333,18 @@ here so that it is followed rather than rediscovered:
 
 1. Change `UCD_VERSION`; run `tools/ucd/fetch.sh`.
 2. `make gen-ucd-tables`; read the diff. **Generated enums append and never
-   renumber** (M12): a new script lands at the end of `GUNI_Script`, and the
-   generator refuses to emit an enum whose existing members changed value,
-   comparing against the committed header.
+   renumber** (M12). The mechanism is that `include/ghoti.io/unicode/enums.h`
+   *is* the record: the generator reads the committed header first and adopts
+   every value it finds, so a new script lands on the first free number and
+   nothing existing can move. A member the new UCD no longer defines is kept,
+   with a comment, rather than dropped - Unicode has renamed a property value
+   before. What the generator refuses is the two ways that record can be
+   *invalid*: a value that appears twice, which would collapse two property
+   values into one and which no test of the tables could catch because the
+   tables would agree with the header; and a value too wide for the record
+   field it is stored in, which would truncate. To renumber deliberately -
+   which breaks every consumer that stored a value - the enum has to be
+   deleted from the header by hand first.
 3. Copy the new conformance files into `tests/data/ucd/<version>/`; delete the
    old directory.
 4. `make test`. Every conformance gate runs against the new files. A UAX
@@ -538,14 +580,46 @@ exhaustive checking the norm rather than the exception.
 
 ### 12.1 The exhaustive sweep is a committed artifact
 
-For every property, the sweep over all 1,114,112 codepoints is canonicalised to
-text and hashed; **the hash per property is committed** in
-`tests/data/sweep/<version>.sums`. A second, human-readable fixture commits the
-answer at the four codepoints around every range boundary in every table
-(`first-1`, `first`, `last`, `last+1`), which is where table-compression bugs
-live and which is small enough to read in a diff. `make test` regenerates both
-and compares. On a Unicode upgrade both change by design, and the boundary
-fixture's diff is the record of what.
+For every property, the value at all 1,114,112 codepoints is canonicalised to
+text - one line per maximal range, `%06X..%06X <value's long name>` - and
+hashed; **the hash and the range count per property are committed** in
+`tests/data/sweep/<version>.sums`, written by `tools/ucd/gen_sweep.py`. That
+script is **a second implementation of reading the UCD**: its own field
+splitting, its own `@missing` handling, its own alias resolution, range lists
+and a linear merge where `gen_tables.py` fills an array. Two parsers that
+shared code would share its bugs. It found two on its first run - one in each
+direction - which is the outcome this arrangement cannot hide.
+
+Values are compared as **text and never as numbers**, so a renumbered enum
+fails here too. The file also carries the **partition**: the boundary set of
+the record itself, which is where any property changes. The library's runs
+table has to reproduce it exactly, and `test_sweep.cpp` derives it from the
+trie rather than reading the runs table, so the two are compared against each
+other and both against the oracle.
+
+`make test` recomputes every number in the fixture from the compiled library,
+over every codepoint, in under a second: the walk compares a cheap integer key
+per codepoint and only spells a value out at a range start. A single flipped
+stage-2 entry - one codepoint pointing at the wrong record - was planted and
+failed three of the four tests, naming the two properties that differed and
+reporting 8,036 partition boundaries where the oracle has 8,035.
+
+The fixture is checksums and not the sweep in full text, which is the third
+departure from this section's draft: a text sweep is 640 KB of a *third* copy
+of the data, and the review artifact on an upgrade already exists - the diff
+of the committed tables under `src/char/tables/`, plus `enums.h`'s new
+members. When a checksum does fail, localising it is a diff of two streams
+rather than a rebuild with printfs:
+
+```
+tools/ucd/gen_sweep.py --property Script > /tmp/oracle
+GUNI_SWEEP_DUMP=Script build/linux/release/apps/testSweep > /tmp/ours
+diff /tmp/oracle /tmp/ours
+```
+
+This is also the machinery that makes migrating `regex` and `text` safe (§16
+phases D and E): before either migration, the sweep is run against *their*
+implementations and the sums committed; after, the sums must match.
 
 This is the machinery that makes migrating `regex` and `text` safe (§16
 phases D and E): before either migration, the sweep is run against *their*
@@ -633,6 +707,7 @@ Beyond the vectors, invariants checked over random input:
 ```
 include/ghoti.io/unicode/
   macros.h  libver.h  libver_gen.h  namespace.h  allocator.h     (CONVENTIONS §4)
+  enums.h       every enumerated property value  GENERATED, COMMITTED         [tier 0]
   core.h        GUNI_Result, GUNI_Limits, GUNI_Error, version                 [tier 0]
   utf.h         decode/encode, GUNI_Invalid                                    [tier 0]
   char.h        every per-codepoint property                                   [tier 0]
@@ -647,13 +722,33 @@ include/ghoti.io/unicode/
 src/
   core/  utf/  char/  set/  script/  case/  norm/  break/  bidi/  name/
     each with <module>_internal.h and tables/ where generated
+  char/tables/
+    tables.h       GENERATED: the record struct, the trie, guni_record()
+    props_data.c   GENERATED: 2,374 records, the two-stage trie, 8,035 runs
+    misc_data.c    GENERATED: blocks, numeric values
+    names_data.c   GENERATED: property and value names, loose-matched aliases
 tools/ucd/
-  fetch.sh  gen_tables.py  test_gen.py  UCD_VERSION
+  fetch.sh  gen_tables.py  gen_sweep.py  test_gen.py  UCD_VERSION
 tools/oracle/
   unicodedata_diff.py  icu_break.cpp
 tests/
   unit/  conformance/  fuzz/  data/ucd/<version>/  data/sweep/
 ```
+
+### 13.0 What the tables cost
+
+Measured at UCD 17.0.0, `.rodata` in the release build:
+
+| Table | Bytes | What it is |
+| --- | ---: | --- |
+| `props_data.o` | 247,416 | 2,374 records (36 bytes each), the trie's 17,408-entry stage 1 and 597 shared 64-codepoint blocks, the 8,035 runs, the Script_Extensions pool |
+| `misc_data.o` | 43,144 | 347 block ranges, 2,734 numeric-value ranges with 64-bit numerators |
+| `names_data.o` | 23,204 | every property's and every value's long name, and 2,527 loose-matched spellings |
+
+316 KB for 97 properties in both call shapes, against the 54,736 lines of
+generated C that `regex` carries for fewer of them. The reason is §4.2's
+shared record: the alternative - a table per property - spends its space on
+storing the same correlations once per property.
 
 ### 13.1 Allocation
 
@@ -723,6 +818,17 @@ author and answered on 2026-09-24; the rest stand as recommended.
 9. **The conformance files are committed.** §5.1, M4.
 10. **Emoji data is pinned to the UCD version.** They have tracked each other
     since Emoji 11; if they ever diverge, `fetch.sh` gains a second pin.
+11. **One record for every property, not a table per property.** §4.2.
+    Decided when the measurement came in: 2,374 distinct records over
+    1,114,112 codepoints.
+12. **`set.h` materialises ranges from the runs table.** §4.2. Decided
+    against committing a range array per property value, which would have
+    been a second copy of the data.
+13. **`enums.h` is generated and committed, and is the numbering's record.**
+    §5.5. The alternative - a side file - would have let the header and the
+    numbering disagree, and the header is what a consumer compiled against.
+14. **`check-ucd-tables` is not in `TEST_GATES`; the sweep fixture covers the
+    same ground from committed data.** §5.2.
 
 ---
 
@@ -735,6 +841,15 @@ D-F migrate its consumers; nothing in `font` that needs Unicode starts before
 E. (`font`'s tiers 0 and 1 - file parsing, outlines, rasterisation - need no
 Unicode at all and can proceed in parallel from phase B onward; see
 `libs/font/documentation/design.md` §17.)
+
+Phase A is **built**: `tools/ucd/` with `fetch.sh`, `gen_tables.py` and
+`gen_sweep.py`; the generated tables and `enums.h`; `utf.h`, `char.h` and
+`set.h`; `tests/unit/test_utf.cpp`, `test_char.cpp`, `test_set.cpp` and
+`test_sweep.cpp`; `tests/fuzz/fuzz_utf.cpp`; and the `gen-ucd-tables`,
+`check-ucd-tables` and `install-conformance` targets. What is not yet done
+from A's line below: the `check-ucd-pins.sh` suite check, and the comparison
+of the sweep sums against `regex`'s `property.c`, which belongs with phase E's
+migration rather than ahead of it.
 
 | Phase | Work | Size | Gate | Unlocks |
 | --- | --- | --- | --- | --- |

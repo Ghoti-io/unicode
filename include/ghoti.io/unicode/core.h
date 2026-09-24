@@ -37,6 +37,12 @@
 extern "C" {
 #endif
 
+/// The largest codepoint the Unicode Standard defines.
+#define GUNI_MAX_CODEPOINT UINT32_C(0x10FFFF)
+
+/// One past it: the size of the codepoint space, 1,114,112.
+#define GUNI_CODEPOINT_COUNT UINT32_C(0x110000)
+
 /**
  * @brief Result code for unicode library operations.
  *
