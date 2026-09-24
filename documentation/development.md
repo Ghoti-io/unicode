@@ -7,14 +7,25 @@ include/ghoti.io/unicode/   Public headers, one per module (design.md section 13
 src/core/                   Result strings, limits, the allocator
 src/utf/                    UTF-8 decode and encode, the GUNI_Invalid policy
 src/char/                   Every per-codepoint property
-src/char/tables/            GENERATED: the record, the trie, the runs, the names
-src/set/                    Properties as sets, and the name lookup
+src/char/tables/            GENERATED: the record, the trie, the runs, the blocks
+src/set/                    Properties as sets, and the property-name lookup
+src/norm/                   UAX #15: the four forms, quick check, stream-safe
+src/break/                  UAX #29 and UAX #14, with LB1 exposed
+src/bidi/                   UAX #9: levels, reordering, mirroring
+src/case/                   Case mapping, the conditions, the fold orbits
+src/script/                 UTS #39 script runs, and the shaper's itemiser
+src/name/                   TIER 1: the character names
 src/unicode.c               The version
+
+Each module with generated tables keeps them under its own tables/ directory,
+so that the file holding the case mappings is the one a reader looking for the
+case mappings would open.
 tests/unit/                 Unit tests (gtest)
 tests/conformance/          The Unicode conformance files and their runners (from phase A)
 tests/data/                 Fixtures, reached through GUNI_TEST_DATA
 tests/fuzz/                 libFuzzer harnesses and seed corpus (from phase A)
 tools/ucd/                  fetch.sh, gen_tables.py, gen_sweep.py, UCD_VERSION
+tools/oracle/               unicodedata_diff.py, the CPython differential
 tools/check-stamps.py       The flag-stamp gate
 ```
 
@@ -91,6 +102,30 @@ to fail on a planted defect before it was trusted, and a gate that has never
 failed is one whose sensitivity is unmeasured. Add a gate the same way: plant
 the defect, watch it fail, then commit it green.
 
+## The differentials
+
+The conformance files are the authority and they run in `make test`. The
+differentials are second opinions, they can be absent, and a run without one
+says how many comparisons it could not make rather than nothing:
+
+```bash
+tools/oracle/unicodedata_diff.py            # CPython's unicodedata
+tools/oracle/unicodedata_diff.py --strict   # for an oracle on our UCD version
+```
+
+It reads the library's answers out of the test binaries' dump modes -
+`GUNI_SWEEP_DUMP=<property>` on `testSweep`, `GUNI_NAME_DUMP=1` on `testName` -
+rather than through a driver of its own, because a differential wants the
+library's answers as text and a test binary already links the library. Those
+same dump modes are how a failing sweep is localised, so they pay for
+themselves twice.
+
+**An oracle two Unicode versions behind disagrees for reasons that are not
+defects**, and the script's header records the triage of every difference it
+currently reports so that a reader does not re-derive it. Two of those
+differences were the script's own, which is the shape of the risk: an oracle
+that is wrong looks exactly like an implementation that is wrong.
+
 ## Fuzzing
 
 The library is rebuilt with `-fsanitize=fuzzer-no-link` rather than linking the
@@ -99,8 +134,15 @@ byte of each input selects the limits, so the capped paths are reachable
 rather than only the wide-open defaults.
 
 ```bash
-make fuzz FUZZ_TIME=3600
+make fuzz FUZZ_TIME=3600          # utf, norm, bidi, break, case, name
+make fuzz-run-bidi FUZZ_TIME=600  # one of them
 ```
+
+The bidi harness earned its keep in its first minute: four characters -
+U+202B U+2066 U+000A U+2069 - made the isolating-run-sequence chain loop for
+ever, on input the conformance files cannot contain because rule P1 makes a
+paragraph separator the last character of its paragraph. A library must not
+hang on input it was not promised.
 
 ## Memory
 

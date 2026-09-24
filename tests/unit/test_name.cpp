@@ -31,6 +31,8 @@
  */
 
 #include <cstdint>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <set>
 #include <string>
@@ -339,6 +341,20 @@ TEST(Name, TheOutputContractAndTheErrorPaths) {
 } // namespace
 
 int main(int argc, char ** argv) {
+  /* Set GUNI_NAME_DUMP=1 to print every name instead of running the tests, for
+   * tools/oracle/unicodedata_diff.py to compare against CPython's own table.
+   * The same shape as testSweep's GUNI_SWEEP_DUMP: a differential wants the
+   * library's answers as text, and a test binary already has the library. */
+  if (std::getenv("GUNI_NAME_DUMP") != nullptr) {
+    char buffer[GUNI_NAME_MAX_LENGTH + 1];
+    for (uint32_t cp = 0; cp < GUNI_CODEPOINT_COUNT; ++cp) {
+      size_t length = 0;
+      if (guni_name(cp, buffer, sizeof(buffer), &length) == GUNI_OK) {
+        std::printf("%06X %s\n", cp, buffer);
+      }
+    }
+    return 0;
+  }
   ::testing::InitGoogleTest(&argc, argv);
   return RUN_ALL_TESTS();
 }

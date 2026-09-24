@@ -798,6 +798,26 @@ Two things are specific to Unicode oracles:
   library's exact UCD version - node 22's ICU 78.2 for segmentation, per the
   `regex` prototype - is the one to prefer for that reason, and the comparison
   is then total.
+
+  **That filter is necessary and not sufficient, which only running it showed.**
+  `DerivedAge` says when a codepoint was *added* and nothing about when its
+  properties *changed*, and between 15.1 and 17.0 they changed for codepoints
+  decades old: U+0295 `Ll` to `Lo`, U+1171E `Mn` to `Mc`, 188 symbols `N` to
+  `W`, U+226D newly mirrored, U+5146's numeric value a million to a million
+  million. A differential two releases behind cannot tell that from a defect,
+  so `unicodedata_diff.py` is **advisory by default** and `--strict` is for an
+  oracle on our own version. It also reports four buckets rather than two -
+  agreed, differed, ours only, theirs only - because "ours only" is usually the
+  oracle's limitation (it does not compute the Tangut names) and "theirs only"
+  is the bucket that would most likely be ours.
+
+  The script's own two defects are worth recording as the shape of the risk: it
+  first compared `Decomposition_Type` as short aliases against the UCD's tag
+  text, reporting all 13,233 decomposable characters, and then reported the
+  11,172 Hangul syllables because `unicodedata.decomposition()` does not return
+  an arithmetic decomposition. **An oracle that is wrong looks exactly like an
+  implementation that is wrong**, from the outside, which is why the triage
+  lives in the script rather than in somebody's memory.
 - **The ICU driver builds inside its image** against the image's ICU alone,
   as `regex`'s `pcre2_match` builds against pcre2 alone, so that the reference
   cannot reach the implementation it answers for.
