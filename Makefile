@@ -1371,8 +1371,9 @@ endef
 $(eval $(call fuzz-rule,fuzz_utf,utf))
 $(eval $(call fuzz-rule,fuzz_norm,norm))
 $(eval $(call fuzz-rule,fuzz_bidi,bidi))
+$(eval $(call fuzz-rule,fuzz_break,break))
 
-FUZZ_NAMES := utf norm bidi
+FUZZ_NAMES := utf norm bidi break
 
 fuzz: ## Build and run every fuzzer for $(FUZZ_TIME) seconds each
 fuzz: $(addprefix fuzz-run-,$(FUZZ_NAMES))

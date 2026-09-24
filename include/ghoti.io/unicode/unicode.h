@@ -32,6 +32,7 @@
 
 #include <ghoti.io/unicode/allocator.h>
 #include <ghoti.io/unicode/bidi.h>
+#include <ghoti.io/unicode/break.h>
 #include <ghoti.io/unicode/char.h>
 #include <ghoti.io/unicode/core.h>
 #include <ghoti.io/unicode/enums.h>

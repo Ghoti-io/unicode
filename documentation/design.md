@@ -1,8 +1,10 @@
 # The design of ghoti.io-unicode
 
-**Status:** phases A and B are built - `core.h`, `utf.h`, `char.h`, `set.h`,
-`norm.h`, `bidi.h`, the generator, the exhaustive sweep, and the
-normalisation and bidi conformance gates. Everything else is design. This page
+**Status:** phases A and B are built, and phase C's segmentation is -
+`core.h`, `utf.h`, `char.h`, `set.h`, `norm.h`, `bidi.h`, `break.h`, the
+generator, the exhaustive sweep, and the conformance gates for
+normalisation, bidi and all four segmentations. `case.h`, `script.h` and
+`name.h` are the rest of C. Everything after that is design. This page
 says what will exist and why, so that the code can be judged against it
 rather than the other way round. A change of mind lands here first, in the
 same commit as the code that needs it (`CONVENTIONS.md` §9), and §16 marks
@@ -189,8 +191,16 @@ the codepoints either side of them.
 Segmentation likewise has both shapes: `guni_break_at()` answers one position
 (the `regex` shape, where the engine is already at an offset and asks whether
 it is a boundary), and `guni_break_iter_*()` walks a buffer (the `font` shape,
-where a paragraph is segmented once). The iterator is the primitive and the
-point query is defined in terms of it, so they cannot disagree either.
+where a paragraph is segmented once), with `guni_break_all()` for a caller
+that wants the whole table at once - "shape once, break many".
+
+**The point query is the primitive and the iterator is defined in terms of
+it**, which is the opposite of what this section first said. The reason is
+that the rules themselves are written as "is there a boundary between these
+two characters": UAX #29 and UAX #14 are both stated that way, so an
+implementation whose primitive is the walk has to invert every rule. One
+engine either way, so neither can disagree with the other; this way the code
+reads like the Standard.
 
 ### 4.3 Invalid input is a policy, and zero refuses
 
@@ -556,10 +566,25 @@ seam with ICU in a dozen lines.
 
 ### 9.1 `GUNI_BreakProvider`
 
-Dictionary-based word breaking for the `SA` scripts (§7.3). One function:
-given a run of codepoints known to be a single `SA` script, fill an array of
-break positions. ICU's `brkitr` dictionaries, `libthai`, or an application's
-own list all fit behind it.
+Dictionary-based line breaking for the `SA` scripts (§7.3). One function, and
+**it asks about one position** rather than filling an array: `sa_break_at(ctx,
+text, start, end, position)`, where `start` and `end` bound the maximal run of
+`SA` characters the position is inside. A provider that wants to segment the
+whole run once - which a dictionary breaker does - caches that on its own
+`ctx`, which is what the run's bounds are passed for.
+
+The array form was the first design and the point form is better for one
+reason: the run is a slice of the caller's own buffer, which is UTF-8 or
+codepoints, so an array of positions would have had to be in one of those and
+the provider would have had to know which. Instead the provider is handed the
+text as an opaque `GUNI_BreakText` and reads it with
+`guni_break_text_at()`, in the caller's own units. ICU's `brkitr`
+dictionaries, `libthai`, or an application's own word list all fit behind it,
+and the library ships nothing.
+
+The provider is consulted **before** the rules and only strictly inside an
+`SA` run, because LB1 has already turned `SA` into `AL` or `CM` by the time
+the rules run - which is precisely why the rules cannot ask.
 
 ### 9.2 `GUNI_SentenceSuppressions`
 
@@ -884,6 +909,14 @@ author and answered on 2026-09-24; the rest stand as recommended.
 17. **The bidi resolver's levels are per character, and reordering is a
     separate function returning a permutation.** §7.2. A resolver that
     returned reordered text would be useless to the consumer it exists for.
+18. **The point query is the primitive; the iterator walks it.** §4.2. The
+    rules are stated as "is there a boundary between these two characters".
+19. **`GUNI_BreakProvider` answers one position, and reads the caller's text
+    through an accessor.** §9.1.
+20. **A byte inside a UTF-8 character is not a boundary**, and is answered
+    false rather than decoded as two ill-formed fragments - which would
+    report a boundary in the middle of one character, and a caller mapping
+    clusters to glyphs would believe it.
 
 ---
 
