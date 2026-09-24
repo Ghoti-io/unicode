@@ -60,6 +60,13 @@
 #define GUNI_SCX_POOL_COUNT 986
 #define GUNI_BLOCK_RANGE_COUNT 346
 #define GUNI_NUMERIC_RANGE_COUNT 1980
+#define GUNI_DECOMP_COUNT 5914
+#define GUNI_DECOMP_POOL_COUNT 6763
+#define GUNI_COMPOSE_COUNT 961
+#define GUNI_MIRROR_COUNT 428
+#define GUNI_BRACKET_COUNT 128
+/* A composition key: the two codepoints, 21 bits each. */
+#define GUNI_COMPOSE_KEY(first, second) (((uint64_t)(first) << 21) | (uint64_t)(second))
 #define GUNI_PROPERTY_ALIAS_COUNT 184
 #define GUNI_VALUE_ALIAS_COUNT 2527
 
@@ -106,6 +113,34 @@ extern const uint16_t guni_scx_pool[GUNI_SCX_POOL_COUNT];
 extern const uint32_t guni_block_first[GUNI_BLOCK_RANGE_COUNT];
 extern const uint32_t guni_block_last[GUNI_BLOCK_RANGE_COUNT];
 extern const uint16_t guni_block_id[GUNI_BLOCK_RANGE_COUNT];
+
+/* Decompositions. The pool holds every canonical and compatibility
+ * decomposition, shared where they are equal; the row arrays are sorted by
+ * codepoint. Hangul is absent on purpose: Standard section 3.12 gives it as
+ * arithmetic (norm.c), and a table would be 11,172 entries of what a dozen
+ * lines compute. */
+extern const uint32_t guni_decomp_pool[GUNI_DECOMP_POOL_COUNT];
+extern const uint32_t guni_decomp_codepoint[GUNI_DECOMP_COUNT];
+extern const uint16_t guni_decomp_nfd_offset[GUNI_DECOMP_COUNT];
+extern const uint8_t guni_decomp_nfd_length[GUNI_DECOMP_COUNT];
+extern const uint16_t guni_decomp_nfkd_offset[GUNI_DECOMP_COUNT];
+extern const uint8_t guni_decomp_nfkd_length[GUNI_DECOMP_COUNT];
+
+/* Canonical composition: the pairs that compose, sorted by a packed key so
+ * that the lookup is one binary search. A canonical decomposition of exactly
+ * two codepoints whose codepoint is not Full_Composition_Exclusion. */
+extern const uint64_t guni_compose_key[GUNI_COMPOSE_COUNT];
+extern const uint32_t guni_compose_value[GUNI_COMPOSE_COUNT];
+
+/* UAX #9's rule L4: the mirrored glyph, and BD14/BD15's bracket pairs for
+ * rule N0. Sorted by codepoint; both are small enough that a binary search is
+ * the whole implementation. */
+extern const uint32_t guni_mirror_from[GUNI_MIRROR_COUNT];
+extern const uint32_t guni_mirror_to[GUNI_MIRROR_COUNT];
+extern const uint32_t guni_bracket_from[GUNI_BRACKET_COUNT];
+extern const uint32_t guni_bracket_pair[GUNI_BRACKET_COUNT];
+/** 1 for an opening bracket, 2 for a closing one. */
+extern const uint8_t guni_bracket_kind[GUNI_BRACKET_COUNT];
 
 extern const uint32_t guni_numeric_first[GUNI_NUMERIC_RANGE_COUNT];
 extern const uint32_t guni_numeric_last[GUNI_NUMERIC_RANGE_COUNT];

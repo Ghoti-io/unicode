@@ -1090,6 +1090,20 @@ typedef enum {
 #define GUNI_INCB_COUNT 4
 
 /**
+ * @brief The most codepoints one codepoint becomes under each form.
+ *
+ * Generated from the data, not stated: a caller sizes a buffer as
+ * `length * GUNI_NORM_MAX_EXPANSION_NFKD` and needs no preflight, and a
+ * future Unicode that exceeded one of these changes the constant rather
+ * than silently overflowing that caller (design.md section 6.3). The
+ * NFKD witness is U+FDFA.
+ */
+#define GUNI_NORM_MAX_EXPANSION_NFD 4
+#define GUNI_NORM_MAX_EXPANSION_NFC 4
+#define GUNI_NORM_MAX_EXPANSION_NFKD 18
+#define GUNI_NORM_MAX_EXPANSION_NFKC 18
+
+/**
  * @brief The single-letter General_Category groups, as masks.
  *
  * `\\p{L}` asks whether a codepoint's category is any of five, and

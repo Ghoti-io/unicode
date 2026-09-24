@@ -583,6 +583,9 @@ class Ucd:
             self.binary_names.extend(names)
         self.binary_names.extend(DERIVED_BINARY)
 
+        self.decomposition = self.load_decompositions()
+        self.mirroring = self.load_mirroring()
+        self.brackets = self.load_brackets()
         self.scx = self.load_script_extensions()
         self.blocks = self.load_blocks()
         self.numeric = self.load_numeric()
@@ -592,6 +595,98 @@ class Ucd:
             if prop.key == key:
                 return prop
         raise KeyError(key)
+
+    def load_decompositions(self):
+        """Full canonical and compatibility decompositions, and the pairs
+        that compose.
+
+        Recursive at generation time, so that the library never recurses:
+        UnicodeData.txt gives one step and the Standard defines the mapping as
+        the fixed point of applying it, so the fixed point is what is stored.
+        A decomposition that did not terminate would hang the generator rather
+        than the library, which is the right place for it to hang.
+
+        Hangul is not here: Standard section 3.12 gives it as arithmetic over
+        11,172 syllables, and a table would be 11,172 entries of something a
+        dozen lines of C computes.
+        """
+        one_step = {}
+        compat_tag = {}
+        for fields in read_records(self.path("UnicodeData.txt")):
+            if len(fields) < 6 or not fields[5]:
+                continue
+            cp = int(fields[0], 16)
+            text = fields[5]
+            if text.startswith("<"):
+                tag, _sep, rest = text.partition(">")
+                compat_tag[cp] = tag[1:]
+                one_step[cp] = [int(part, 16) for part in rest.split()]
+            else:
+                one_step[cp] = [int(part, 16) for part in text.split()]
+
+        canonical = {cp: seq for cp, seq in one_step.items() if cp not in compat_tag}
+
+        def expand(cp, compatibility, seen):
+            """The fixed point, with a cycle guard the data should never need."""
+            source = one_step if compatibility else canonical
+            if cp not in source:
+                return [cp]
+            if cp in seen:
+                raise SystemExit("decomposition of U+%04X is cyclic" % cp)
+            out = []
+            for part in source[cp]:
+                out.extend(expand(part, compatibility, seen | {cp}))
+            return out
+
+        nfd = {}
+        nfkd = {}
+        for cp in sorted(one_step):
+            if cp in canonical:
+                full = expand(cp, False, set())
+                if full != [cp]:
+                    nfd[cp] = full
+            full = expand(cp, True, set())
+            if full != [cp]:
+                nfkd[cp] = full
+
+        # Composition: a canonical decomposition of exactly two codepoints,
+        # whose codepoint is not excluded. Singletons - one codepoint -
+        # never compose, which is what Full_Composition_Exclusion's
+        # "singleton decomposition" clause says, and the derived property
+        # already includes them.
+        excluded = read_binary(self.path("DerivedNormalizationProps.txt"),
+                               ("Full_Composition_Exclusion",))
+        exclusion = excluded["Full_Composition_Exclusion"]
+        pairs = {}
+        for cp, seq in canonical.items():
+            if len(seq) != 2 or exclusion[cp]:
+                continue
+            pairs[(seq[0], seq[1])] = cp
+        return {"nfd": nfd, "nfkd": nfkd, "pairs": pairs, "tag": compat_tag}
+
+    def load_mirroring(self):
+        """Bidi_Mirroring_Glyph: what UAX #9's rule L4 substitutes."""
+        out = {}
+        for fields in read_records(self.path("BidiMirroring.txt")):
+            if len(fields) < 2 or not fields[1]:
+                continue
+            out[int(fields[0], 16)] = int(fields[1], 16)
+        return out
+
+    def load_brackets(self):
+        """BidiBrackets.txt: the paired bracket and whether it opens or closes.
+
+        BD14 and BD15, which rule N0 reads. The canonical-equivalence clause -
+        U+2329 is to be treated as U+3008 - is not applied here: it is applied
+        in bidi.c through the decomposition table, because doing it in the
+        table would lose the distinction a caller may want to see.
+        """
+        out = {}
+        for fields in read_records(self.path("BidiBrackets.txt")):
+            if len(fields) < 3:
+                continue
+            out[int(fields[0], 16)] = (int(fields[1], 16), fields[2])
+        return out
 
     def load_script_extensions(self):
         """cp -> tuple of canonical script long names, defaulting to Script.
@@ -657,6 +752,7 @@ class Tables:
         self.build_records()
         self.build_trie()
         self.build_runs()
+        self.build_decompositions()
 
     # -- enums -------------------------------------------------------------
 
@@ -767,6 +863,61 @@ class Tables:
             stage1.append(slot)
         self.stage1 = stage1
         self.stage2 = [value for block in blocks for value in block]
+
+    # -- decompositions ----------------------------------------------------
+
+    def build_decompositions(self):
+        """One shared pool, and a sorted index into it.
+
+        A sorted array with a binary search rather than a trie, because the
+        lookup is already gated: Decomposition_Type is a field of the record,
+        so a codepoint with no decomposition - which is 1,108,000 of them -
+        never reaches the search at all. Only the 6,000 that have one pay 13
+        iterations, and they pay it once per codepoint per normalisation and
+        not per glyph per frame.
+
+        Sequences are shared: a codepoint whose canonical and compatibility
+        decompositions are equal - most of them - stores one.
+        """
+        data = self.ucd.decomposition
+        pool = []
+        offsets = {}
+
+        def intern(sequence):
+            key = tuple(sequence)
+            if key not in offsets:
+                offsets[key] = len(pool)
+                pool.extend(key)
+            return offsets[key]
+
+        codepoints = sorted(set(data["nfd"]) | set(data["nfkd"]))
+        rows = []
+        for cp in codepoints:
+            nfd = data["nfd"].get(cp)
+            nfkd = data["nfkd"].get(cp)
+            rows.append((
+                cp,
+                intern(nfd) if nfd else 0, len(nfd) if nfd else 0,
+                intern(nfkd) if nfkd else 0, len(nfkd) if nfkd else 0))
+        if len(pool) > 0xFFFF:
+            raise SystemExit("decomposition pool exceeds a uint16 offset")
+        self.decomp_pool = pool
+        self.decomp_rows = rows
+        self.compose = sorted((first, second, composite)
+                              for (first, second), composite
+                              in self.ucd.decomposition["pairs"].items())
+        self.max_expansion = {
+            "NFD": max((len(v) for v in data["nfd"].values()), default=1),
+            "NFKD": max((len(v) for v in data["nfkd"].values()), default=1),
+        }
+        # NFC and NFKC can leave marks the composition could not absorb, so
+        # their bound is the decomposed bound: composition never grows a
+        # sequence, and a caller sizing a buffer from these is safe for the
+        # intermediate as well as the result.
+        self.max_expansion["NFC"] = self.max_expansion["NFD"]
+        self.max_expansion["NFKC"] = self.max_expansion["NFKD"]
+        witness = max(data["nfkd"], key=lambda cp: len(data["nfkd"][cp]))
+        self.max_expansion_witness = witness
 
     # -- runs --------------------------------------------------------------
 
@@ -1073,6 +1224,17 @@ extern "C" {
         # General_Category groups. \p{L} is a mask test rather than an
         # equality test, and the mask is generated because the membership of
         # each group is the UCD's to decide.
+        out.write("\n/**\n * @brief The most codepoints one codepoint becomes "
+                  "under each form.\n *\n"
+                  " * Generated from the data, not stated: a caller sizes a buffer as\n"
+                  " * `length * GUNI_NORM_MAX_EXPANSION_NFKD` and needs no preflight, and a\n"
+                  " * future Unicode that exceeded one of these changes the constant rather\n"
+                  " * than silently overflowing that caller (design.md section 6.3). The\n"
+                  " * NFKD witness is U+%04X.\n */\n" % tables.max_expansion_witness)
+        for form in ("NFD", "NFC", "NFKD", "NFKC"):
+            out.write("#define GUNI_NORM_MAX_EXPANSION_%s %d\n"
+                      % (form, tables.max_expansion[form]))
+
         gc = tables.numbering["GUNI_GeneralCategory"]
         out.write("\n/**\n * @brief The single-letter General_Category groups, as masks.\n"
                   " *\n"
@@ -1196,6 +1358,14 @@ def emit_tables_header(ucd, tables, entries, out_dir):
         out.write("#define GUNI_SCX_POOL_COUNT %d\n" % len(tables.scx_pool))
         out.write("#define GUNI_BLOCK_RANGE_COUNT %d\n" % len(ucd.blocks))
         out.write("#define GUNI_NUMERIC_RANGE_COUNT %d\n" % len(ucd.numeric))
+        out.write("#define GUNI_DECOMP_COUNT %d\n" % len(tables.decomp_rows))
+        out.write("#define GUNI_DECOMP_POOL_COUNT %d\n" % len(tables.decomp_pool))
+        out.write("#define GUNI_COMPOSE_COUNT %d\n" % len(tables.compose))
+        out.write("#define GUNI_MIRROR_COUNT %d\n" % len(ucd.mirroring))
+        out.write("#define GUNI_BRACKET_COUNT %d\n" % len(ucd.brackets))
+        out.write("/* A composition key: the two codepoints, 21 bits each. */\n")
+        out.write("#define GUNI_COMPOSE_KEY(first, second) "
+                  "(((uint64_t)(first) << 21) | (uint64_t)(second))\n")
         out.write("#define GUNI_PROPERTY_ALIAS_COUNT %d\n" % len(tables.property_aliases))
         out.write("#define GUNI_VALUE_ALIAS_COUNT %d\n" % len(tables.value_aliases))
 
@@ -1229,6 +1399,34 @@ extern const uint16_t guni_scx_pool[GUNI_SCX_POOL_COUNT];
 extern const uint32_t guni_block_first[GUNI_BLOCK_RANGE_COUNT];
 extern const uint32_t guni_block_last[GUNI_BLOCK_RANGE_COUNT];
 extern const uint16_t guni_block_id[GUNI_BLOCK_RANGE_COUNT];
+
+/* Decompositions. The pool holds every canonical and compatibility
+ * decomposition, shared where they are equal; the row arrays are sorted by
+ * codepoint. Hangul is absent on purpose: Standard section 3.12 gives it as
+ * arithmetic (norm.c), and a table would be 11,172 entries of what a dozen
+ * lines compute. */
+extern const uint32_t guni_decomp_pool[GUNI_DECOMP_POOL_COUNT];
+extern const uint32_t guni_decomp_codepoint[GUNI_DECOMP_COUNT];
+extern const uint16_t guni_decomp_nfd_offset[GUNI_DECOMP_COUNT];
+extern const uint8_t guni_decomp_nfd_length[GUNI_DECOMP_COUNT];
+extern const uint16_t guni_decomp_nfkd_offset[GUNI_DECOMP_COUNT];
+extern const uint8_t guni_decomp_nfkd_length[GUNI_DECOMP_COUNT];
+
+/* Canonical composition: the pairs that compose, sorted by a packed key so
+ * that the lookup is one binary search. A canonical decomposition of exactly
+ * two codepoints whose codepoint is not Full_Composition_Exclusion. */
+extern const uint64_t guni_compose_key[GUNI_COMPOSE_COUNT];
+extern const uint32_t guni_compose_value[GUNI_COMPOSE_COUNT];
+
+/* UAX #9's rule L4: the mirrored glyph, and BD14/BD15's bracket pairs for
+ * rule N0. Sorted by codepoint; both are small enough that a binary search is
+ * the whole implementation. */
+extern const uint32_t guni_mirror_from[GUNI_MIRROR_COUNT];
+extern const uint32_t guni_mirror_to[GUNI_MIRROR_COUNT];
+extern const uint32_t guni_bracket_from[GUNI_BRACKET_COUNT];
+extern const uint32_t guni_bracket_pair[GUNI_BRACKET_COUNT];
+/** 1 for an opening bracket, 2 for a closing one. */
+extern const uint8_t guni_bracket_kind[GUNI_BRACKET_COUNT];
 
 extern const uint32_t guni_numeric_first[GUNI_NUMERIC_RANGE_COUNT];
 extern const uint32_t guni_numeric_last[GUNI_NUMERIC_RANGE_COUNT];
@@ -1425,6 +1623,67 @@ def emit_misc_data(ucd, tables, out_dir):
         out.write("};\n")
 
 
+def emit_norm_data(ucd, tables, out_dir):
+    with open_out(out_dir, "src/char/tables/norm_data.c") as out:
+        out.write(LICENSE_NOTICE)
+        out.write("\n")
+        out.write(generated_notice(ucd.version,
+                                  "UnicodeData.txt field 5 and "
+                                  "DerivedNormalizationProps.txt"))
+        out.write("\n#include \"tables.h\"\n")
+        out.write("\n/* Every decomposition, fully expanded at generation time so that the\n"
+                  " * library never recurses. Shared where a codepoint's canonical and\n"
+                  " * compatibility decompositions are the same sequence. */\n")
+        out.write("const uint32_t guni_decomp_pool[GUNI_DECOMP_POOL_COUNT] = {\n")
+        emit_array(out, tables.decomp_pool, 8, lambda v: "0x%06Xu" % v)
+        out.write("};\n")
+        out.write("\nconst uint32_t guni_decomp_codepoint[GUNI_DECOMP_COUNT] = {\n")
+        emit_array(out, [row[0] for row in tables.decomp_rows], 8,
+                   lambda v: "0x%06Xu" % v)
+        out.write("};\n")
+        out.write("\nconst uint16_t guni_decomp_nfd_offset[GUNI_DECOMP_COUNT] = {\n")
+        emit_array(out, [row[1] for row in tables.decomp_rows], 12)
+        out.write("};\n")
+        out.write("\nconst uint8_t guni_decomp_nfd_length[GUNI_DECOMP_COUNT] = {\n")
+        emit_array(out, [row[2] for row in tables.decomp_rows], 20)
+        out.write("};\n")
+        out.write("\nconst uint16_t guni_decomp_nfkd_offset[GUNI_DECOMP_COUNT] = {\n")
+        emit_array(out, [row[3] for row in tables.decomp_rows], 12)
+        out.write("};\n")
+        out.write("\nconst uint8_t guni_decomp_nfkd_length[GUNI_DECOMP_COUNT] = {\n")
+        emit_array(out, [row[4] for row in tables.decomp_rows], 20)
+        out.write("};\n")
+        mirroring = sorted(ucd.mirroring.items())
+        out.write("\n/* Bidi_Mirroring_Glyph, for rule L4. */\n")
+        out.write("const uint32_t guni_mirror_from[GUNI_MIRROR_COUNT] = {\n")
+        emit_array(out, [cp for cp, _to in mirroring], 8, lambda v: "0x%06Xu" % v)
+        out.write("};\n")
+        out.write("\nconst uint32_t guni_mirror_to[GUNI_MIRROR_COUNT] = {\n")
+        emit_array(out, [to for _cp, to in mirroring], 8, lambda v: "0x%06Xu" % v)
+        out.write("};\n")
+        brackets = sorted(ucd.brackets.items())
+        out.write("\n/* BidiBrackets.txt, for rule N0. */\n")
+        out.write("const uint32_t guni_bracket_from[GUNI_BRACKET_COUNT] = {\n")
+        emit_array(out, [cp for cp, _pair in brackets], 8, lambda v: "0x%06Xu" % v)
+        out.write("};\n")
+        out.write("\nconst uint32_t guni_bracket_pair[GUNI_BRACKET_COUNT] = {\n")
+        emit_array(out, [pair[0] for _cp, pair in brackets], 8,
+                   lambda v: "0x%06Xu" % v)
+        out.write("};\n")
+        out.write("\nconst uint8_t guni_bracket_kind[GUNI_BRACKET_COUNT] = {\n")
+        emit_array(out, [1 if pair[1] == "o" else 2 for _cp, pair in brackets], 20)
+        out.write("};\n")
+
+        out.write("\n/* The pairs that compose, by packed key. */\n")
+        out.write("const uint64_t guni_compose_key[GUNI_COMPOSE_COUNT] = {\n")
+        emit_array(out, tables.compose, 4,
+                   lambda row: "GUNI_COMPOSE_KEY(0x%06Xu, 0x%06Xu)" % (row[0], row[1]))
+        out.write("};\n")
+        out.write("\nconst uint32_t guni_compose_value[GUNI_COMPOSE_COUNT] = {\n")
+        emit_array(out, tables.compose, 8, lambda row: "0x%06Xu" % row[2])
+        out.write("};\n")
+
+
 def emit_names_data(ucd, tables, entries, out_dir):
     prop_numbering = tables.numbering["GUNI_Property"]
     with open_out(out_dir, "src/char/tables/names_data.c") as out:
@@ -1516,14 +1775,18 @@ def main(argv):
     emit_tables_header(ucd, tables, entries, args.out)
     emit_props_data(ucd, tables, entries, args.out)
     emit_misc_data(ucd, tables, args.out)
+    emit_norm_data(ucd, tables, args.out)
     emit_names_data(ucd, tables, entries, args.out)
 
     sys.stderr.write(
         "%d distinct records, %d stage-2 blocks, %d runs, %d scx words, "
-        "%d properties, %d value spellings\n"
+        "%d properties, %d value spellings, %d decompositions in %d words, "
+        "%d composition pairs, %d mirrors, %d brackets\n"
         % (len(tables.records), len(tables.stage2) // BLOCK_SIZE,
            len(tables.runs), len(tables.scx_pool), len(entries),
-           len(tables.value_aliases)))
+           len(tables.value_aliases), len(tables.decomp_rows),
+           len(tables.decomp_pool), len(tables.compose), len(ucd.mirroring),
+           len(ucd.brackets)))
     return 0
 
 

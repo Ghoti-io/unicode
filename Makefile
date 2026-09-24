@@ -572,6 +572,14 @@ $(OBJ_DIR)/tests/%.o: tests/unit/%.cpp $(FLAGS_STAMP)
 	@mkdir -p $(@D)
 	$(CXX) $(CXXFLAGS) $(INCLUDE) -Itests -DGUNI_TEST_DATA=\"$(TEST_DATA)\" -c $< -MMD -MP -MF $(@:.o=.d) -o $@
 
+# tests/conformance/ holds the runners for the Consortium's own files, which
+# are committed under tests/data/ucd/ so that none of them can skip
+# (documentation/design.md section 2, M4).
+$(OBJ_DIR)/tests/%.o: tests/conformance/%.cpp $(FLAGS_STAMP)
+	@printf "\n### Compiling Conformance Test: $* ###\n"
+	@mkdir -p $(@D)
+	$(CXX) $(CXXFLAGS) $(INCLUDE) -Itests -DGUNI_TEST_DATA=\"$(TEST_DATA)\" -c $< -MMD -MP -MF $(@:.o=.d) -o $@
+
 # Build rule for one test executable. $1 = source path, $2 = executable name.
 # Tests compile to .o first and link separately, so a library change relinks
 # without recompiling every test.
@@ -1253,6 +1261,11 @@ $(ASAN_OBJ_DIR)/tests/%.o: tests/unit/%.cpp $(ASAN_FLAGS_STAMP)
 	@mkdir -p $(@D)
 	$(CXX) $(ASAN_CXXFLAGS) $(INCLUDE) -Itests -DGUNI_TEST_DATA=\"$(TEST_DATA)\" -c $< -MMD -MP -MF $(@:.o=.d) -o $@
 
+$(ASAN_OBJ_DIR)/tests/%.o: tests/conformance/%.cpp $(ASAN_FLAGS_STAMP)
+	@printf "\n### Compiling ASan Test: $* ###\n"
+	@mkdir -p $(@D)
+	$(CXX) $(ASAN_CXXFLAGS) $(INCLUDE) -Itests -DGUNI_TEST_DATA=\"$(TEST_DATA)\" -c $< -MMD -MP -MF $(@:.o=.d) -o $@
+
 define asan-test-executable-rule
 ASAN_TEST_OBJ_$1 := $(ASAN_OBJ_DIR)/tests/$(basename $(notdir $1)).o
 
@@ -1356,8 +1369,10 @@ endef
 # with the module it fuzzes, because a harness for code that does not exist
 # yet is a line in a Makefile pretending to be coverage.
 $(eval $(call fuzz-rule,fuzz_utf,utf))
+$(eval $(call fuzz-rule,fuzz_norm,norm))
+$(eval $(call fuzz-rule,fuzz_bidi,bidi))
 
-FUZZ_NAMES := utf
+FUZZ_NAMES := utf norm bidi
 
 fuzz: ## Build and run every fuzzer for $(FUZZ_TIME) seconds each
 fuzz: $(addprefix fuzz-run-,$(FUZZ_NAMES))

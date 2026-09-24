@@ -1,7 +1,8 @@
 # The design of ghoti.io-unicode
 
-**Status:** phase A is built - `core.h`, `utf.h`, `char.h`, `set.h`, the
-generator, and the exhaustive sweep. Everything else is design. This page
+**Status:** phases A and B are built - `core.h`, `utf.h`, `char.h`, `set.h`,
+`norm.h`, `bidi.h`, the generator, the exhaustive sweep, and the
+normalisation and bidi conformance gates. Everything else is design. This page
 says what will exist and why, so that the code can be judged against it
 rather than the other way round. A change of mind lands here first, in the
 same commit as the code that needs it (`CONVENTIONS.md` §9), and §16 marks
@@ -265,9 +266,14 @@ build without network access. The **conformance files are committed too**,
 under `tests/data/ucd/<version>/`, which is the departure from `regex` (M4):
 `GraphemeBreakTest.txt`, `WordBreakTest.txt`, `SentenceBreakTest.txt`,
 `LineBreakTest.txt`, `NormalizationTest.txt`, `BidiTest.txt` and
-`BidiCharacterTest.txt`, about 8 MB together, under the Unicode License v3 with
-its notice in `tests/data/ucd/LICENSE`. A clone's `make test` runs every
-conformance gate with no fetch and no skip.
+`BidiCharacterTest.txt`, under the Unicode License v3 with its notice in
+`tests/data/ucd/LICENSE`. A clone's `make test` runs every conformance gate
+with no fetch and no skip.
+
+Measured rather than estimated: the seven are **21 MB** on disk, of which git
+stores 2.3 MB - they are repetitive text and compress by nine to one. Each
+arrives in the commit that adds the runner that reads it, so that no data file
+sits in the repository with nothing testing it.
 
 The emoji data files (`emoji-data.txt`, `emoji-sequences.txt`,
 `emoji-zwj-sequences.txt`, `emoji-variation-sequences.txt`) are published
@@ -396,14 +402,32 @@ generator from the actual data and checked by a test that decomposes every
 codepoint. `text`'s `nfc.c` today carries `4 * len` as a comment; here it is a
 constant that would fail a build if the data ever exceeded it.
 
-### 6.4 Stream-safe text
+### 6.4 Stream-safe text, and where the working buffer comes from
 
 UAX #15 §13's Stream-Safe Text Format - at most 30 non-starters in a row - is
-what makes normalising a stream in bounded memory possible. The library exposes
-the check and the transform (`guni_norm_stream_safe()`), and its own
-normaliser accepts text that is not stream-safe, because refusing real input
-is not an option, but bounds its working buffer by the input length times the
-form's expansion factor rather than by the run of non-starters.
+what makes normalising a stream in bounded memory possible. The library
+exposes the check and the transform (`guni_stream_safe()`).
+
+**What was built, which is not quite what this section first said.** The
+normaliser needs no working buffer at all, and so has no bound to state: it
+decomposes and canonically orders *into the caller's output buffer*, inserting
+each mark into the trailing run as it goes, and then composes in place over
+what it wrote. The cost of that is one thing a caller has to know, and it is
+in `norm.h`: the composing forms need the buffer to hold the **intermediate
+decomposition**, which can be longer than the result, so `GUNI_ERR_LIMIT`
+reports a sufficient length rather than the exact one and success reports the
+exact one.
+
+The one function with a fixed internal buffer is `guni_normalize_utf8()`,
+because UTF-8 in and UTF-8 out cannot be reordered in place. It processes the
+text between **normalisation boundaries** - a starter whose quick-check
+property is `YES`, a position where the text before and after normalise
+independently - with a 512-codepoint window. Real text has a boundary at
+nearly every character. A run of more than 512 codepoints without one is
+`GUNI_ERR_LIMIT`, and `guni_stream_safe()` is the documented way through;
+refusing beats truncating, and beats growing a buffer whose size the input
+chose. The codepoint entry point has no such limit, because it works in the
+caller's buffer and there is nothing to overflow.
 
 ---
 
@@ -440,7 +464,28 @@ Two conformance files gate it and both are exhaustive over their domain:
 `BidiTest.txt` enumerates every sequence of bidi classes up to a length and
 gives levels and reorderings for each of the three paragraph directions;
 `BidiCharacterTest.txt` does the same over real codepoints, which is what
-exercises the bracket-pair rule.
+exercises the bracket-pair rule. Measured: **770,241 cases** from the first
+and **91,707** from the second, and they earned their place immediately by
+finding two defects that every hand-written test had passed:
+
+- **rules I1 and I2 were resolving into the array rule X10 reads.** X10 takes
+  each isolating run sequence's `sos` and `eos` from the levels rules X1-X9
+  assigned, and I1/I2 *raise* those levels; resolving in place made one
+  sequence's boundary depend on another's resolution. 61 of
+  `BidiCharacterTest.txt`'s cases, and none of the obvious ones. The fix is a
+  separate `embedding` array, which is why the resolver's working state is
+  eleven bytes per character rather than ten.
+- **rule X6 excludes `BN` and the code did not.** An active override was
+  rewriting a Boundary_Neutral's class to `L` or `R`, which took it out of the
+  set X9 removes and put it into the rules as a strong character. 25 of
+  `BidiTest.txt`'s 770,241 cases, every one of them a `BN` inside an
+  override.
+
+The working state is a fixed buffer for paragraphs up to
+`GUNI_BIDI_MAX_STACK_LENGTH` (1,024 characters) and comes from an allocator
+beyond that, through `guni_bidi_levels_with_allocator()` - the one allocating
+function in the library (§13.1). The fuzzer runs both and compares them, so
+the two paths cannot drift.
 
 ### 7.3 LB1 is the caller's, and `SA` is a provider's
 
@@ -829,6 +874,16 @@ author and answered on 2026-09-24; the rest stand as recommended.
     numbering disagree, and the header is what a consumer compiled against.
 14. **`check-ucd-tables` is not in `TEST_GATES`; the sweep fixture covers the
     same ground from committed data.** §5.2.
+15. **Normalisation works in the caller's buffer, and the composing forms
+    need room for the intermediate.** §6.4. The alternative - an allocating
+    variant, or a working buffer proportional to the input - buys an exact
+    preflight length for the composing forms and nothing else.
+16. **`guni_normalize_utf8()` has a bounded window and refuses a run with no
+    normalisation boundary in it.** §6.4. The alternative is a buffer whose
+    size the input chooses.
+17. **The bidi resolver's levels are per character, and reordering is a
+    separate function returning a permutation.** §7.2. A resolver that
+    returned reordered text would be useless to the consumer it exists for.
 
 ---
 
