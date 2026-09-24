@@ -75,7 +75,7 @@ five are this suite's own; the rest are the field's.
 | # | The mistake | Where it happened | What `unicode` does instead |
 | --- | --- | --- | --- |
 | M1 | The same tables generated three times by three libraries, from three generators, with three version pins nothing checks | This suite: `regex` and `text` at UCD 17.0.0 by coincidence, `font` about to be the third | One generator, one pin, one committed output, and a suite-level check that every `UCD_VERSION` file agrees (§5.4) |
-| M2 | A tailoring decision baked into a shared table at generation time | `regex`'s generator applies UAX #14's LB1 while generating: `CJ` becomes `NS`, which *is* CSS `line-break: strict`; a layout engine needs the other two | Tables carry the unresolved classes; LB1 is a function the caller applies with a policy (§7.3) |
+| M2 | A tailoring decision baked into a shared table at generation time | `regex`'s generator applies UAX #14's LB1 while generating: `CJ` becomes `NS`, so `line-break: loose` is unreachable and a layout engine cannot ask for it | Tables carry the unresolved classes; LB1 is a function the caller applies with a policy, and the policy is the whole CSS `line-break` property rather than LB1's binary choice (§7.3) |
 | M3 | A UTF-16 API, so every UTF-8 program converts on the way in and out | ICU's `u_*` functions; `ctang`'s `u_strFromUTF8`/`u_strToUTF8` are half its ICU call sites | UTF-8 is the primary encoding; boundaries are byte offsets; a codepoint-array entry point stands beside it, and no UTF-16 API exists (§4.1) |
 | M4 | A conformance gate that skips when its data is absent, with no second gate | `regex`'s `test_break.cpp` skips without `third_party/ucd/`; defensible there because the Perl differential also exists, indefensible for a shared owner | The conformance files are committed; the gate cannot skip (§12.2) |
 | M5 | One consumer's call shape imposed on the next consumer | Would have been `font` looping a per-position query written for `regex` | Both shapes - point query and bulk iteration - are first-class and generated from one source (§4.2) |
@@ -503,17 +503,50 @@ This is M2 and it is the one substantive change to the code that moves.
 UAX #14's rule LB1 resolves five classes "that cannot be determined from the
 character alone": `AI`, `SG` and `XX` become `AL`; `SA` becomes `CM` or `AL`
 by general category; `CJ` becomes `NS` **or `ID`, at the implementation's
-choice** - and that choice is what CSS's `line-break` property exposes as
-`strict` (`NS`), `normal` and `loose` (`ID`, with further tailorings). `regex`
-resolves all five at table-generation time and picks `NS`. Correct for its
-`\b{lb}`, which follows Perl; wrong for a layout engine that must offer all
-three.
+choice**. `regex` resolves all five at table-generation time and picks `NS`.
+Correct for its `\b{lb}`, which follows Perl; wrong for a layout engine.
 
 So: the generated `Line_Break` table carries the raw classes.
 `guni_lb_resolve(class, general_category, GUNI_LineBreakTailoring)` applies LB1
 with the caller's choice, and the iterator takes the tailoring as an argument.
 `regex` passes `STRICT` and its behaviour is byte-identical, which §12.3's
-pairwise sweep proves.
+pairwise sweep proves - and that claim is checked as a control: the `strict`
+column of `tests/data/break/linebreak-pairs.txt` is byte-identical across every
+change to the tailorings, because `strict` takes none of them.
+
+**LB1's axis is binary, and CSS's `line-break` is not LB1.** An earlier revision
+of this section said `strict` was `NS` and `normal` and `loose` were `ID`, which
+is wrong: CSS Text requires that breaks before class `CJ` be *"forbidden for
+normal and strict line breaking and allowed in loose"*, so `loose` is LB1's only
+taker. The specification's change log dates the correction - "Disallowed breaks
+before small kana in `line-break: normal`", CSSWG issue 10363, after the
+September 2024 Candidate Recommendation Draft - and ICU 78.3 still implements the
+older rule, which is one of the divergences §12.4 records.
+
+**So `GUNI_LineBreakTailoring` is the CSS property, not the LB1 choice**, and it
+carries all eight of CSS Text §5.2's tailorings plus `anywhere`. `break.h` has
+the table; the shape that matters here is that four of the eight apply *only if
+the writing system is Chinese or Japanese*, which no property of a character can
+answer. `GUNI_BreakOptions` therefore carries a `GUNI_WritingSystem` - three
+values, no table behind it, nothing loaded, nothing read from the environment, so
+M6 and M7 hold: it is a document's claim about its own content, and a caller
+holding a BCP 47 tag maps it itself. Under the zero value, `normal` and `strict`
+are the same rule set, which is what CSS says they are outside Chinese and
+Japanese.
+
+**What those tailorings override, CSS does not say**, and it says outright that
+"the precise set of rules in effect for each of `loose`, `normal`, and `strict`
+is up to the UA". Two decisions, both measured against ICU rather than reasoned
+about:
+
+- A "break before X" tailoring yields to `BB`, `OP` and `QU` - the three classes
+  that forbid a break *after themselves*. Nothing about an iteration mark should
+  let a line begin after an opening bracket: that prohibition is the bracket's.
+- The prefix and suffix tailorings lift LB23a, LB25 and LB27 only - the rules
+  that pair a numeric prefix or suffix with its number or ideograph. So `100¥`
+  may break in loose Japanese and `(¥` may not. Taking "breaks after prefixes
+  are allowed" at its word would separate a currency sign from its digits, which
+  no typesetter wants and no browser does.
 
 `SA` - Thai, Lao, Khmer, Myanmar, and the other South-East Asian scripts that
 write without spaces - resolves to `AL` under LB1 and therefore has **no
@@ -675,7 +708,7 @@ The gate on all of that is a round trip over every codepoint that has a name -
 | `regex` | properties as range lists for `\p{...}`; the four segmentations for `\b{gcb}` etc.; fold orbits; names for `\N{...}`; script runs for `(*sr:...)` | `set`, `break` (with `STRICT`), `case`, `name`, `script` | Deletes `src/unicode/` except `vim_class.c`; its own tables go; `test_unicode.cpp` and `test_break.cpp` move here. Applies LB1 itself (§7.3) |
 | `text` | NFC for IDNA and YAML; `Bidi_Class`, `Joining_Type`, `Hangul_Syllable_Type`, combining class for the IDNA validity rules | `norm`, `char` | Deletes `nfc.c`, `nfc_utf8.c`, `nfc_tables.c`; keeps `idna.c` and its two mapping tables (§15.3) |
 | `ctang` | grapheme cluster boundaries for its string type | `break` | Replaces `UBRK_CHARACTER` and the two UTF-16 conversions in `src/unicodeString.c`; ICU leaves the suite |
-| `font` | script itemisation; bidi levels and reordering; grapheme boundaries for the cluster map; line-break opportunities with all three tailorings and the `SA` seam; NFD for mark decomposition; joining, Indic, USE, emoji and vertical-orientation properties for the shapers | `script`, `bidi`, `break`, `norm`, `char` | Designed against it; `libs/font/documentation/design.md` |
+| `font` | script itemisation; bidi levels and reordering; grapheme boundaries for the cluster map; line-break opportunities with every CSS `line-break` value, the writing-system field and the `SA` seam; NFD for mark decomposition; joining, Indic, USE, emoji and vertical-orientation properties for the shapers | `script`, `bidi`, `break`, `norm`, `char` | Designed against it; `libs/font/documentation/design.md` |
 
 `chron` needs nothing: its formatter's names come from a provider and are
 already case-correct as provided. `image`, `compress`, `model` and `cjelly`
@@ -872,6 +905,28 @@ Two things are specific to Unicode oracles:
   disagreement means a defect. What is pinned is the base by digest and the
   tarball by the SHA-512 the Consortium publishes beside the release - the bytes
   rather than a tag - plus the run-time version check, per CONTAINERS.md §2.6.
+
+  **Five divergences from ICU, all measured and all explained.** In the order
+  they were found, with the differential's own guard suite (`--self-test-only`,
+  33 near-miss cases) keeping each one from absorbing a defect:
+
+  1. `loose` breaks before the six Japanese iteration marks and between two `IN`
+     characters - which this library did not do, and now does.
+  2. ICU allows the small-kana break under `normal`, implementing CSS as it stood
+     before CSSWG issue 10363. Dated by the specification's own change log.
+  3. ICU applies the hyphen rule to all eleven codepoints of class `HH` where CSS
+     names `U+2010` and `U+2013`, and gates it on language where CSS gates it on
+     the preceding character's class. Visible on both sides of the character.
+  4. ICU's prefix and suffix tailorings are broader than CSS's, which are about
+     numbers and ideographs - measured as 41 left-hand classes against a wide
+     `PR` where CSS's reading gives nine.
+  5. ICU segments Han, Kana and the `Complex_Context` scripts with a dictionary,
+     in word breaking only.
+
+  The four writing-system-conditional tailorings agree with ICU **exactly** when
+  it is asked with a `ja` locale, which is the configuration where it can answer
+  them at all; asking root and reporting that ICU lacked them would have been the
+  wrong question.
 
   **Segmentation had no second opinion at all before this.** `unicodedata`
   exposes no boundary function, so UAX #29 and UAX #14 were gated by the

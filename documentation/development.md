@@ -208,26 +208,40 @@ run its gtest suite instead.
 run. An oracle that could reach the implementation it answers for is not an
 oracle; `regex`'s `pcre2_match` is the same shape.
 
-### The two divergences, and what they are not
+### The five divergences, and what they are not
 
 Differences are **explained, never excluded** - and offset by offset, not case by
 case, so a case carrying one known divergence and one defect is not filed under
 the divergence. Nothing is dropped from the pool, so a difference of any *other*
 shape at those same characters still fails the gate.
 
-1. **`GUNI_LINE_BREAK_LOOSE` is UAX #14's LB1, not CSS's `line-break: loose`.**
-   CSS's `loose` selects LB1's `CJ`-to-`ID` resolution *and* adds tailorings of
-   its own. ICU implements those; this library implements LB1. So ICU's `loose`
-   allows breaks this library does not, and the header used to call the enum
-   member "CSS `loose`", which overclaimed.
-2. **ICU segments some scripts with a dictionary.** Inside a run of Han,
-   Hiragana, Katakana, Thai, Lao, Khmer or Myanmar, ICU is answering a different
-   question: it joins two Han characters into one word where WB999 breaks them,
-   and splits supplementary-plane Katakana where WB13 joins it. This library
-   implements the rules and offers the dictionary as a provider seam instead
+1. **ICU implements CSS `normal` as it stood before CSSWG issue 10363**, which
+   allowed a break before class `CJ`. The current specification forbids it for
+   `normal` and `strict` alike and says so in its own change log. This library
+   follows the current text, which is why `normal` and `strict` are the same rule
+   set in neutral writing systems.
+2. **ICU applies the hyphen rule to all eleven codepoints of class `HH`** where
+   CSS names `U+2010` and `U+2013`, and gates it on language where CSS gates it
+   on the preceding character's class. Visible on both sides of the character: it
+   breaks before one and then keeps it attached to what follows.
+3. **ICU's prefix and suffix tailorings are broader than CSS's.** CSS asks for a
+   break before a wide `PO` and after a wide `PR`, and only beside a number or
+   ideograph; ICU also breaks the other way round and beside letters and symbols.
+   Measured as 41 left-hand classes against a wide `PR`.
+4. **ICU segments some scripts with a dictionary**, in *word* breaking only.
+   Inside a run of Han, Hiragana, Katakana or one of the eleven
+   `Complex_Context` scripts, it joins two Han characters into one word where
+   WB999 breaks them and splits supplementary-plane Katakana where WB13 joins it.
+   This library implements the rules and offers the dictionary as a provider seam
    (design.md section 9).
+5. The four writing-system-conditional tailorings **agree with ICU exactly**
+   under a `ja` locale, which is where it can answer them. That is not a
+   divergence; it is here because asking root instead - and reporting that ICU
+   lacked them - is the mistake the locale field exists to prevent.
 
-Everything else agrees exactly - all four algorithms, all three tailorings.
+Everything else agrees exactly, across all four algorithms, three CSS values and
+three writing systems. `anywhere` is not compared: ICU has no `@lb=anywhere`, so
+it is gated by the unit tests instead.
 
 It reads the library's answers out of the test binaries' dump modes -
 `GUNI_SWEEP_DUMP=<property>` on `testSweep`, `GUNI_NAME_DUMP=1` on `testName` -
