@@ -23,9 +23,12 @@
  *
  * The four segmentations on text nobody chose, against their own invariants.
  *
- * The options byte selects the kind and the line-break tailoring, so one
- * corpus exercises all twelve combinations. What is asserted is what a
- * conformance file cannot say:
+ * The options byte selects the kind, the line-break tailoring and the writing
+ * system, so one corpus exercises all forty-eight combinations. Each field
+ * spells the enum's own count rather than a literal: the tailoring axis was
+ * three values when this was written and is four now, and a literal `% 3`
+ * here went on returning clean while covering none of `anywhere`. What is
+ * asserted is what a conformance file cannot say:
  *
  *   * **boundaries are strictly increasing**, which is what makes a cluster
  *     map monotone and a layout engine's line loop terminate;
@@ -95,7 +98,10 @@ extern "C" int LLVMFuzzerTestOneInput(const uint8_t * data, size_t size) {
   GUNI_BreakOptions options;
   std::memset(&options, 0, sizeof(options));
   options.kind = static_cast<GUNI_BreakKind>(data[0] % GUNI_BREAK_KIND_COUNT);
-  options.tailoring = static_cast<GUNI_LineBreakTailoring>((data[0] >> 2) % 3);
+  options.tailoring = static_cast<GUNI_LineBreakTailoring>(
+      (data[0] >> 2) % GUNI_LINE_BREAK_TAILORING_COUNT);
+  options.writing_system = static_cast<GUNI_WritingSystem>(
+      (data[0] >> 4) % GUNI_WRITING_SYSTEM_COUNT);
 
   ProviderState state = {data, size, 0};
   GUNI_BreakProvider provider = {&state, &provider_answer};

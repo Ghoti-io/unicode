@@ -93,11 +93,17 @@ typedef enum {
  * makes no claim about the content - and under it CSS `normal` and `strict`
  * become identical, which is what CSS Text says they are outside Chinese and
  * Japanese.
+ *
+ * GUNI_WRITING_SYSTEM_COUNT closes the enum so that anything sweeping this
+ * axis - a fuzz harness, a differential, a test matrix - spells the bound
+ * rather than a literal. A literal is how a sweep quietly stops covering a
+ * value that was added after it was written.
  */
 typedef enum {
   GUNI_WRITING_SYSTEM_NEUTRAL = 0, ///< No claim. `normal` and `strict` agree.
   GUNI_WRITING_SYSTEM_CHINESE,     ///< Chinese conventions apply.
-  GUNI_WRITING_SYSTEM_JAPANESE     ///< Japanese conventions apply.
+  GUNI_WRITING_SYSTEM_JAPANESE,    ///< Japanese conventions apply.
+  GUNI_WRITING_SYSTEM_COUNT
 } GUNI_WritingSystem;
 
 /**
@@ -145,6 +151,9 @@ typedef enum {
  * CSS's fifth value, `auto`, is deliberately absent: the specification defines
  * it as whatever the UA decides, varying with line length, so it is a policy
  * and not a rule set. A caller that wants it chooses among these per line.
+ *
+ * GUNI_LINE_BREAK_TAILORING_COUNT closes the enum, for the reason given on
+ * GUNI_WRITING_SYSTEM_COUNT: this axis has already grown once.
  */
 typedef enum {
   GUNI_LINE_BREAK_STRICT = 0, ///< CSS `strict`. `CJ` resolves to `NS`.
@@ -167,7 +176,8 @@ typedef enum {
    * (UAX #14 LB2), which is where this differs from asking for
    * GUNI_BREAK_GRAPHEME directly.
    */
-  GUNI_LINE_BREAK_ANYWHERE
+  GUNI_LINE_BREAK_ANYWHERE,
+  GUNI_LINE_BREAK_TAILORING_COUNT
 } GUNI_LineBreakTailoring;
 
 /**

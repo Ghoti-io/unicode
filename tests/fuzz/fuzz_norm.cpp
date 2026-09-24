@@ -75,7 +75,7 @@ extern "C" int LLVMFuzzerTestOneInput(const uint8_t * data, size_t size) {
   if (size < 2) {
     return 0;
   }
-  const GUNI_NormForm form = static_cast<GUNI_NormForm>(data[0] % 4);
+  const GUNI_NormForm form = static_cast<GUNI_NormForm>(data[0] % GUNI_NORM_FORM_COUNT);
   const char * text = reinterpret_cast<const char *>(data + 1);
   const size_t length = size - 1;
 
