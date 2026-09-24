@@ -26,11 +26,15 @@ the ones an implementation gets subtly wrong while passing every pair. Random
 strings over a class-stratified pool reach them; a pair table cannot.
 
 **Measured complete**, 2026-09-24, by `--exhaustive` at ICU 78.3: every codepoint
-in three contexts, all four algorithms, all three LB1 resolutions - 23,353,344
-comparisons, **3,067 explained and 0 unexplained**. The 3,067 are the two
-divergences at the top of this file and nothing else: 12 iteration-mark cases and
-6 inseparable-pair cases in `loose`, and 3,049 dictionary cases in `word`.
-Grapheme, sentence and every other line tailoring agree on all 3,336,192.
+in three contexts, all four algorithms, all three CSS `line-break` values and all
+three writing systems - **40,034,304 comparisons, 3,441 explained and 0
+unexplained**. The 3,441 are the divergences named at the top of this file and
+nothing else.
+
+Two of those rows are the base algorithm's own control: `line/strict/neutral` and
+`grapheme` and `sentence` each agree with ICU on all 3,336,192 comparisons with
+nothing to explain at all. Everything this library tailors is visible as a
+divergence somewhere, and everything it does not tailor agrees exactly.
 
 **The reference links only ICU.** `icu_break.cpp` is compiled inside
 `containers/icu/`, against that image's ICU and nothing else, so the oracle
