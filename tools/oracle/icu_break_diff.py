@@ -25,6 +25,13 @@ number sequences, the regional-indicator pair count in GB12/GB13 - are exactly
 the ones an implementation gets subtly wrong while passing every pair. Random
 strings over a class-stratified pool reach them; a pair table cannot.
 
+**Measured complete**, 2026-09-24, by `--exhaustive` at ICU 78.3: every codepoint
+in three contexts, all four algorithms, all three LB1 resolutions - 23,353,344
+comparisons, **3,067 explained and 0 unexplained**. The 3,067 are the two
+divergences at the top of this file and nothing else: 12 iteration-mark cases and
+6 inseparable-pair cases in `loose`, and 3,049 dictionary cases in `word`.
+Grapheme, sentence and every other line tailoring agree on all 3,336,192.
+
 **The reference links only ICU.** `icu_break.cpp` is compiled inside
 `containers/icu/`, against that image's ICU and nothing else, so the oracle
 cannot reach the implementation it answers for. ICU 78.3 carries Unicode 17.0,
@@ -56,6 +63,8 @@ import os
 import random
 import subprocess
 import sys
+
+MAX_CODEPOINT = 0x10FFFF
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(HERE))
@@ -260,6 +269,60 @@ def pairwise_requests(sweep, prop, kind, tailorings, rng, per_class):
     return requests, representatives
 
 
+# The contexts an exhaustive sweep places each codepoint in. Two characters is
+# enough to reach the pair rules and is what the divergence list was established
+# over; a longer frame multiplies the cost without adding a rule the random mode
+# does not already reach.
+#
+# `doubled` is the context a dictionary acts in - a run of one script - and is
+# what showed that ICU's dictionary divergence is word-only. The two Han frames
+# are what showed that the `loose` divergence is exactly six codepoints.
+EXHAUSTIVE_CONTEXTS = [
+    ("doubled", lambda cp: chr(cp) * 2),
+    ("after Han", lambda cp: "\u4e00" + chr(cp)),
+    ("before Han", lambda cp: chr(cp) + "\u4e00"),
+]
+
+
+def exhaustive_chunks(kinds, chunk, upto=MAX_CODEPOINT):
+    """Every codepoint, in every context, in blocks small enough to hold.
+
+    **This is what entitles the divergence list to say "complete".** The guard
+    suite in --self-test-only is a floor: its cases are ones I thought of, and it
+    caught the bug it caught because that bug happened to share a shape with a
+    case already written. A divergence nobody imagined walks straight through it.
+    Only a sweep that asks about every codepoint can say the list is finished, and
+    it is the thing to re-run when the ICU pin moves - a new ICU is new
+    tailorings, and the explanation table is written against the ones measured
+    here.
+
+    Yielded in chunks because the whole sweep is tens of millions of requests and
+    the request list is text: 23 million lines does not want to be one list.
+
+    `upto` stops early. A sweep that takes tens of minutes and can only be run
+    whole is one nobody debugs and nobody bisects - the first attempt to check
+    this code path was a 22-minute run of `--kind line` that printed nothing for
+    its first minute because stdout block-buffers into a pipe, which is not how
+    to find out whether the plumbing works.
+    """
+    for base in range(0, upto + 1, chunk):
+        requests = []
+        for cp in range(base, min(base + chunk, upto + 1)):
+            if 0xD800 <= cp <= 0xDFFF:
+                # Not text: a lone surrogate cannot be encoded as UTF-8, so
+                # neither side can be asked about it.
+                continue
+            for _label, frame in EXHAUSTIVE_CONTEXTS:
+                hexed = binascii.hexlify(
+                    frame(cp).encode("utf-8")).decode().upper()
+                for kind in kinds:
+                    tailorings = TAILORINGS if kind == "line" else ["default"]
+                    for tailoring in tailorings:
+                        requests.append((kind, hexed, tailoring))
+        if requests:
+            yield base, requests
+
+
 def ask(argv, requests, who, environment=None):
     """Send every request to one side, and read back one framed answer each."""
     body = "".join("%s\t%s\t%s\n" % request for request in requests)
@@ -449,6 +512,97 @@ def self_test(sweep):
     return wrong
 
 
+class Tally:
+    """The running comparison, so that no mode counts differently.
+
+    The exhaustive mode compares in chunks and every other mode compares one
+    list, and that is exactly the shape where two copies of the counting drift
+    apart. There is one copy, and `add()` is it.
+    """
+
+    def __init__(self, script, line_break, keep_examples):
+        self.script = script
+        self.line_break = line_break
+        self.keep_examples = keep_examples
+        self.counts = {}
+        self.examples = {}
+        self.explained_by = {}
+        self.requests = 0
+
+    def add(self, requests, mine, theirs):
+        for request, ours, yours in zip(requests, mine, theirs):
+            kind, hexed, tailoring = request
+            key = (kind, tailoring)
+            self.requests += 1
+            agreed, explained, unexplained = self.counts.get(key, (0, 0, 0))
+            if ours == yours:
+                self.counts[key] = (agreed + 1, explained, unexplained)
+                continue
+            text = binascii.unhexlify(hexed).decode("utf-8")
+            reason = explain(kind, tailoring, text, ours, yours, self.script,
+                             self.line_break)
+            if reason is not None:
+                self.counts[key] = (agreed, explained + 1, unexplained)
+                counts = self.explained_by.setdefault(key, {})
+                counts[reason] = counts.get(reason, 0) + 1
+                continue
+            self.counts[key] = (agreed, explained, unexplained + 1)
+            held = self.examples.setdefault(key, [])
+            if len(held) < self.keep_examples:
+                held.append((text, ours, yours))
+
+    def report(self):
+        """Print every line and return the number of unexplained differences."""
+        total_unexplained = 0
+        total_explained = 0
+        for key in sorted(self.counts):
+            agreed, explained, unexplained = self.counts[key]
+            total_unexplained += unexplained
+            total_explained += explained
+            label = key[0] if key[0] != "line" else "%s/%s" % key
+            print("  %-16s %8d agreed %6d explained %6d UNEXPLAINED  %s"
+                  % (label, agreed, explained, unexplained,
+                     "ok" if unexplained == 0 else "DIFFERS"))
+            for reason, count in sorted(self.explained_by.get(key, {}).items()):
+                print("      %6d  %s" % (count, reason))
+            for text, ours, yours in self.examples.get(key, []):
+                print("      %s" % " ".join("U+%04X" % ord(ch) for ch in text))
+                print("        ours %s" % (ours or "(none)"))
+                print("        icu  %s" % (yours or "(none)"))
+
+        compared = sum(sum(entry) for entry in self.counts.values())
+        print()
+        if compared == 0:
+            print("nothing was compared, which is not a pass")
+            return 1
+        print("%d comparisons over %d requests: %d explained, %d unexplained"
+              % (compared, self.requests, total_explained, total_unexplained))
+        print()
+        print("An explained difference is one of the documented divergences at"
+              " the top of this")
+        print("file, checked offset by offset rather than case by case - a case"
+              " where one")
+        print("offset is a known divergence and another is a defect is not"
+              " explained. Nothing")
+        print("is excluded from the pool: the characters that diverge stay in"
+              " it, so that a")
+        print("difference of any other shape at those characters still fails.")
+        return 1 if total_unexplained else 0
+
+
+def icu_argv():
+    """The reference, compiled inside its image against that image's ICU.
+
+    A couple of seconds once per run. The alternative is a binary built at
+    image-build time from a copy of this source the image would have to carry,
+    which is a second thing to keep in step with this file.
+    `exec` replaces the shell so that stdin reaches the driver.
+    """
+    return oracle_env.command(ORACLE, ["sh", "-c",
+        "g++ -O1 -o /tmp/icu_break %s/tools/oracle/icu_break.cpp"
+        " -licuuc -licui18n && exec /tmp/icu_break" % ROOT])
+
+
 def main(argv):
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--build", default=os.path.join(ROOT, "build", "linux",
@@ -466,6 +620,19 @@ def main(argv):
                         help="compare only these kinds (may be repeated)")
     parser.add_argument("--show", type=int, default=6,
                         help="differing cases to print per kind")
+    parser.add_argument("--exhaustive", action="store_true",
+                        help="every codepoint in every context, instead of a "
+                             "sample: tens of minutes, and the thing that "
+                             "entitles the divergence list to claim it is "
+                             "complete. Re-run it when the ICU pin moves")
+    parser.add_argument("--chunk", type=lambda text: int(text, 0),
+                        default=0x10000,
+                        help="codepoints per batch in --exhaustive")
+    parser.add_argument("--upto", type=lambda text: int(text, 0),
+                        default=MAX_CODEPOINT,
+                        help="stop --exhaustive at this codepoint, for a quick "
+                             "check or a bisect; the completeness claim needs "
+                             "the default")
     parser.add_argument("--self-test-only", action="store_true",
                         help="check the explainer's guards and stop; needs no "
                              "container")
@@ -490,6 +657,41 @@ def main(argv):
         return 0
     print()
 
+    environment = dict(os.environ)
+    environment["GUNI_BREAK_DUMP"] = "stdin"
+    environment.setdefault("GUNI_TEST_DATA", os.path.join(ROOT, "tests", "data"))
+    script = property_of(sweep, "Script")
+    line_break = property_of(sweep, "Line_Break", absent="Unknown")
+    tally = Tally(script, line_break, args.show)
+
+    known = [kind for kind, _prop in KINDS]
+    if args.kind:
+        unknown = [kind for kind in args.kind if kind not in known]
+        if unknown:
+            raise SystemExit("not a break kind: %s" % ", ".join(unknown))
+    kinds = [kind for kind in known if not args.kind or kind in args.kind]
+
+    if args.exhaustive:
+        contexts = ", ".join(label for label, _frame in EXHAUSTIVE_CONTEXTS)
+        print("exhaustive: U+0000..U+%04X in %d contexts (%s), kinds %s"
+              % (args.upto, len(EXHAUSTIVE_CONTEXTS), contexts, "/".join(kinds)))
+        if args.upto < MAX_CODEPOINT:
+            print("PARTIAL: --upto stops short of U+10FFFF, so this run does not"
+                  " support the completeness claim")
+        else:
+            print("this is what lets the divergence list say \"complete\"; it"
+                  " takes tens of minutes")
+        print(flush=True)
+        for base, requests in exhaustive_chunks(kinds, args.chunk, args.upto):
+            mine = ask([segment], requests, "this library", environment)
+            theirs = ask(icu_argv(), requests, "icu")
+            tally.add(requests, mine, theirs)
+            sys.stderr.write("  through U+%05X, %d requests, %d unexplained\n"
+                % (min(base + args.chunk, args.upto), tally.requests,
+                   sum(entry[2] for entry in tally.counts.values())))
+            sys.stderr.flush()
+        return tally.report()
+
     if args.pairwise:
         rng = random.Random(args.seed)
         requests = []
@@ -505,95 +707,22 @@ def main(argv):
     else:
         requests, pools = generate(sweep, args.cases, args.seed, args.per_class,
                                    args.min_len, args.max_len)
-    if args.kind:
-        known = [kind for kind, _prop in KINDS]
-        unknown = [kind for kind in args.kind if kind not in known]
-        if unknown:
-            raise SystemExit("not a break kind: %s" % ", ".join(unknown))
-        requests = [r for r in requests if r[0] in args.kind]
+    requests = [request for request in requests if request[0] in kinds]
     if not requests:
         raise SystemExit("no requests, which is not a pass")
 
     for kind, prop in KINDS:
-        if args.kind and kind not in args.kind:
+        if kind not in kinds:
             continue
         by_class, flat = pools[kind]
         print("pool for %-9s %3d values of %-22s %4d codepoints"
               % (kind, len(by_class), prop, len(flat)))
     print()
 
-    environment = dict(os.environ)
-    environment["GUNI_BREAK_DUMP"] = "stdin"
-    environment.setdefault("GUNI_TEST_DATA", os.path.join(ROOT, "tests", "data"))
     mine = ask([segment], requests, "this library", environment)
-
-    # The driver is compiled inside the image, against that image's ICU, on
-    # every run. It costs a couple of seconds once per gate - the alternative
-    # is a binary built at image-build time from a source the image would then
-    # have to contain a copy of, which is a second thing to keep in step with
-    # this file. `exec` replaces the shell so that stdin reaches the driver.
-    theirs = ask(oracle_env.command(ORACLE, ["sh", "-c",
-        "g++ -O1 -o /tmp/icu_break %s/tools/oracle/icu_break.cpp"
-        " -licuuc -licui18n && exec /tmp/icu_break" % ROOT]),
-        requests, "icu")
-
-    script = property_of(sweep, "Script")
-    line_break = property_of(sweep, "Line_Break", absent="Unknown")
-    tally = {}
-    examples = {}
-    explained_by = {}
-    for request, ours, yours in zip(requests, mine, theirs):
-        kind, hexed, tailoring = request
-        key = (kind, tailoring)
-        agreed, explained, unexplained = tally.get(key, (0, 0, 0))
-        if ours == yours:
-            tally[key] = (agreed + 1, explained, unexplained)
-            continue
-        text = binascii.unhexlify(hexed).decode("utf-8")
-        reason = explain(kind, tailoring, text, ours, yours, script, line_break)
-        if reason is not None:
-            tally[key] = (agreed, explained + 1, unexplained)
-            counts = explained_by.setdefault(key, {})
-            counts[reason] = counts.get(reason, 0) + 1
-            continue
-        tally[key] = (agreed, explained, unexplained + 1)
-        examples.setdefault(key, []).append((text, ours, yours))
-
-    total_unexplained = 0
-    total_explained = 0
-    for key in sorted(tally):
-        agreed, explained, unexplained = tally[key]
-        total_unexplained += unexplained
-        total_explained += explained
-        label = key[0] if key[0] != "line" else "%s/%s" % key
-        print("  %-16s %6d agreed %5d explained %5d UNEXPLAINED  %s"
-              % (label, agreed, explained, unexplained,
-                 "ok" if unexplained == 0 else "DIFFERS"))
-        for reason, count in sorted(explained_by.get(key, {}).items()):
-            print("      %5d  %s" % (count, reason))
-        for text, ours, yours in examples.get(key, [])[:args.show]:
-            print("      %s" % " ".join("U+%04X" % ord(ch) for ch in text))
-            print("        ours %s" % (ours or "(none)"))
-            print("        icu  %s" % (yours or "(none)"))
-
-    compared = sum(sum(entry) for entry in tally.values())
-    print()
-    if compared == 0:
-        print("nothing was compared, which is not a pass")
-        return 1
-    print("%d comparisons over %d strings: %d explained, %d unexplained"
-          % (compared, len(requests), total_explained, total_unexplained))
-    print()
-    print("An explained difference is one of the two documented divergences at"
-          " the top of")
-    print("this file, checked offset by offset rather than case by case - a case"
-          " where one")
-    print("offset is a known divergence and another is a defect is not"
-          " explained. Nothing")
-    print("is excluded from the pool: the characters that diverge stay in it, so"
-          " that a")
-    print("difference of any other shape at those characters still fails.")
-    return 1 if total_unexplained else 0
+    theirs = ask(icu_argv(), requests, "icu")
+    tally.add(requests, mine, theirs)
+    return tally.report()
 
 
 if __name__ == "__main__":

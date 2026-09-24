@@ -54,4 +54,11 @@ python-next	docker.io/library/python:3.15-rc-slim@sha256:4c269ae51995d15c7115f34
 #
 # One pin rather than the two the CPython oracle keeps, because there is no
 # released-versus-candidate tension: 78.3 is released *and* matches.
+#
+# **When this pin moves, run `make check-oracle-icu-exhaustive`.** A new ICU is
+# new tailorings, and the explanation table in icu_break_diff.py names the ones
+# measured under 78.3 - every codepoint, three contexts, all three LB1
+# resolutions. The sampling gate would not necessarily notice a tailoring the
+# table does not know about, and the explainer's guard suite certainly would not:
+# its cases are the ones somebody thought of.
 icu	localhost/ghoti-unicode-oracle-icu:78.3	Unicode 17.0	UAX #29 grapheme, word and sentence boundaries; UAX #14 line breaks under all three LB1 tailorings

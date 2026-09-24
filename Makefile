@@ -994,6 +994,26 @@ check-oracle-icu: ucd-present $(TEST_EXECUTABLES)
 		--cases $(ICU_CASES) --seed $(ICU_SEED))
 	$(call run-oracle,icu,tools/oracle/icu_break_diff.py --pairwise)
 
+check-oracle-icu-exhaustive: ## The ICU comparison over every codepoint, not a sample
+# **This is what entitles the divergence list to say "complete."** The gate above
+# samples, and tools/oracle/icu_break_diff.py's --self-test-only guard suite is a
+# floor: its cases are ones somebody thought of, and it caught the defect it
+# caught because that defect shared a shape with a case already written. A
+# divergence nobody imagined walks straight through it. Only asking about every
+# codepoint settles the question.
+#
+# Tens of minutes, so not part of check-oracles. **Run it when the ICU pin in
+# containers/IMAGES moves**: a new ICU is new tailorings, and the explanation
+# table in icu_break_diff.py is written against the ones measured under the
+# current pin.
+#
+# ICU_UPTO stops it short, for a quick check or a bisect. A partial run says so
+# in its own output and does not support the claim.
+ICU_UPTO ?= 0x10FFFF
+check-oracle-icu-exhaustive: ucd-present $(TEST_EXECUTABLES)
+	$(call run-oracle,icu,tools/oracle/icu_break_diff.py --exhaustive \
+		--upto $(ICU_UPTO))
+
 oracle-images: ## Build the oracle images that are built here rather than pulled
 # Only `icu` is built here; the CPython pins are stock images pulled by digest.
 # Separate from the gate because it takes minutes and a gate should not: ICU is
@@ -1047,7 +1067,8 @@ check-oracles: check-oracle-unicodedata check-oracle-unicodedata-strict \
 	check-oracle-icu
 
 .PHONY: check-oracle-unicodedata check-oracle-unicodedata-strict
-.PHONY: check-oracle-icu check-oracles oracle-images oracle-clean
+.PHONY: check-oracle-icu check-oracle-icu-exhaustive
+.PHONY: check-oracles oracle-images oracle-clean
 
 ####################################################################
 # Tier layering

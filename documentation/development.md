@@ -165,16 +165,36 @@ uniform sample of the codespace is 73% unassigned and would spend its budget on
 `XX`. Two modes, and they see different things:
 
 ```bash
-make check-oracle-icu                             # random strings, seeded
-tools/oracle/icu_break_diff.py --pairwise         # every ordered class pair
+make check-oracle-icu                             # the gate: random + pairwise
+make check-oracle-icu-exhaustive                  # every codepoint; tens of minutes
 make check-oracle-icu ICU_CASES=20000 ICU_SEED=$RANDOM   # a hunt
+tools/oracle/icu_break_diff.py --self-test-only   # the explainer alone, no container
 ```
 
-The random mode samples characters and reaches long-context rules; `--pairwise`
-is exhaustive over class *pairs* but uses one representative per class, so a
-character its own class treats specially is invisible to it. Both were needed to
-find the two divergences below: the first surfaced in random strings, the second
-in the pairwise sweep, and neither mode found both.
+Three modes, and the differences between them are the point:
+
+- **Random strings** over a pool stratified by every value of every break
+  property. Samples characters, and reaches the long-context rules a pair table
+  cannot. Found the six Japanese iteration marks.
+- **`--pairwise`**, every ordered pair of every break class. Exhaustive over
+  pairs, but one representative per class, so a character its own class treats
+  specially is invisible to it. Found `IN × IN`, which random text almost never
+  produces adjacent. The gate runs this and the random mode, because neither
+  found both divergences.
+- **`--exhaustive`**, every codepoint in three contexts. **This is what entitles
+  the divergence list to say "complete"**, and it is the mode to re-run when the
+  ICU pin moves - a new ICU is new tailorings, and the explanation table is
+  written against the ones measured under the current pin. Tens of minutes, so it
+  is not in `check-oracles`; `ICU_UPTO` stops it short for a bisect and a partial
+  run says in its own output that it does not support the claim.
+
+Why the last one is not optional: the explainer's guard suite is a **floor**.
+Its cases are ones somebody thought of, and it caught the defect it caught
+because that defect happened to share a shape with a case already written. A
+divergence nobody imagined walks straight through it. `--exhaustive` is the only
+mode that can finish the question, and it is affordable for the reason
+`notes/suite/CONTAINERS.md` §2.7 gives: once the per-case process cost is gone,
+the oracle answers about 20,000 requests a second.
 
 Both sides of the comparison speak one protocol - one request per line, one
 framed answer per line, **the answer echoing the request** - so `testSegment`
