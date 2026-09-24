@@ -208,7 +208,7 @@ run its gtest suite instead.
 run. An oracle that could reach the implementation it answers for is not an
 oracle; `regex`'s `pcre2_match` is the same shape.
 
-### The five divergences, and what they are not
+### The six divergences, and what they are not
 
 Differences are **explained, never excluded** - and offset by offset, not case by
 case, so a case carrying one known divergence and one defect is not filed under
@@ -234,7 +234,12 @@ shape at those same characters still fails the gate.
    WB999 breaks them and splits supplementary-plane Katakana where WB13 joins it.
    This library implements the rules and offers the dictionary as a provider seam
    (design.md section 9).
-5. The four writing-system-conditional tailorings **agree with ICU exactly**
+5. **ICU's zh/ja locales break beside `U+201C` and `U+201D`** in every
+   tailoring, where UAX #14's LB19 forbids it. Neither UAX #14 nor CSS asks for
+   it - it is a language convention, and design.md section 9 routes those through
+   `GUNI_BreakProvider`. Exactly two of class `QU`'s 39 codepoints, measured one
+   by one.
+6. The four writing-system-conditional tailorings **agree with ICU exactly**
    under a `ja` locale, which is where it can answer them. That is not a
    divergence; it is here because asking root instead - and reporting that ICU
    lacked them - is the mistake the locale field exists to prevent.

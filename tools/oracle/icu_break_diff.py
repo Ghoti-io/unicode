@@ -219,6 +219,18 @@ CSS_LETTER_CLASSES = {"Alphabetic", "Hebrew_Letter"}
 # below must refuse them.
 CSS_PAIRED_CLASSES = {"Ideographic", "E_Base", "E_Modifier", "Numeric",
                       "JL", "JV", "JT", "H2", "H3"}
+
+# ICU's Chinese and Japanese locales allow a break beside the two directional
+# double quotation marks, in **every** tailoring, where UAX #14's LB19 and LB19a
+# forbid it. Neither UAX #14 nor CSS's line-break property asks for this: it is a
+# language convention, which is the kind of thing design.md section 9 routes
+# through GUNI_BreakProvider rather than into the rule engine.
+#
+# Exactly these two of class QU's 39 codepoints, measured one by one - the
+# straight quote U+0022 is not tailored, and neither are the single curly quotes.
+# Not conditioned on the neighbour either: `QU x AL` diverges as well as
+# `ID x QU`.
+ICU_CJK_QUOTES = {0x201C, 0x201D}
 CSS_WIDE_WIDTHS = {"Ambiguous", "Fullwidth", "Wide"}
 
 
@@ -613,6 +625,13 @@ def explain(kind, tailoring, system, text, ours, theirs, script, line_break,
                             " CSS's, which are about numbers and ideographs")
                 continue
 
+        if (kind == "line" and theirs_only and system != "neutral"
+                and ((before is not None and ord(before) in ICU_CJK_QUOTES)
+                     or (after is not None and ord(after) in ICU_CJK_QUOTES))):
+            reasons.add("ICU's zh/ja locales break beside U+201C and U+201D;"
+                        " UAX #14 LB19 forbids it and CSS does not ask")
+            continue
+
         if kind == "word":
             complex_context = [ch for ch in (before, after) if ch is not None
                                and line_break(ord(ch)) == DICTIONARY_LINE_BREAK]
@@ -688,6 +707,14 @@ def self_test_cases():
          "grapheme", "default", "neutral", doubled_han, "0 3 6", "0 6", False),
         ("a known divergence and a defect in the same case",
          "line", "loose", "neutral", marks, "6 9", "3 5 6 9", False),
+        ("ICU breaks beside U+201C in Japanese, in every tailoring",
+         "line", "strict", "japanese", chr(han) + chr(0x201C), "6", "3 6", True),
+        ("the same in neutral, where ICU's locale rule does not apply",
+         "line", "strict", "neutral", chr(han) + chr(0x201C), "6", "3 6", False),
+        ("the same but ours-only, the wrong direction",
+         "line", "strict", "japanese", chr(han) + chr(0x201C), "3 6", "6", False),
+        ("the STRAIGHT quote, which ICU does not tailor",
+         "line", "strict", "japanese", chr(han) + chr(0x0022), "4", "3 4", False),
     ] + [
         # The small-kana divergence with CJ on the left rather than the right,
         # which the first explainer could not see.

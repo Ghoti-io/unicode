@@ -906,7 +906,7 @@ Two things are specific to Unicode oracles:
   tarball by the SHA-512 the Consortium publishes beside the release - the bytes
   rather than a tag - plus the run-time version check, per CONTAINERS.md §2.6.
 
-  **Five divergences from ICU, all measured and all explained.** In the order
+  **Six divergences from ICU, all measured and all explained.** In the order
   they were found, with the differential's own guard suite (`--self-test-only`,
   33 near-miss cases) keeping each one from absorbing a defect:
 
@@ -922,6 +922,11 @@ Two things are specific to Unicode oracles:
      `PR` where CSS's reading gives nine.
   5. ICU segments Han, Kana and the `Complex_Context` scripts with a dictionary,
      in word breaking only.
+  6. ICU's Chinese and Japanese locales allow a break beside `U+201C` and
+     `U+201D` - exactly two of class `QU`'s 39 codepoints - in every tailoring,
+     where LB19 forbids it. A language convention, so §9's provider seam is where
+     it would belong; the straight quote is not tailored and neither are the
+     single curly quotes.
 
   The four writing-system-conditional tailorings agree with ICU **exactly** when
   it is asked with a `ja` locale, which is the configuration where it can answer
