@@ -1,0 +1,775 @@
+# The design of ghoti.io-unicode
+
+**Status:** design; the scaffold is built and nothing else is. This page
+says what will exist and why, so that the code can be judged against it
+rather than the other way round. A change of mind lands here first, in the
+same commit as the code that needs it (`CONVENTIONS.md` §9), and §16 marks
+what is built. The workspace's `notes/suite/UNICODE-LIBRARY.md` records the
+decision to build this library and the inventory that motivated it.
+
+`unicode` is the suite's Unicode library: the Character Database as generated
+tables, and the algorithms the Unicode Standard Annexes define over them -
+normalisation, segmentation, line breaking, bidirectional ordering, case
+mapping, and the properties a shaper needs. It exists because three libraries
+here need this and two of them have already written it: `regex` carries a
+full UAX #29 and UAX #14 implementation and 54,736 lines of generated tables;
+`text` carries NFC and 7,341 lines of its own; `ctang` links ICU to get one
+grapheme-cluster iterator; and `font`, the next library, would be the third
+copy. The full inventory is in `notes/suite/UNICODE-LIBRARY.md` §1.
+
+The prefix is `GUNI_` / `guni_`. The package is `ghoti.io-unicode-0`, the
+include path `<ghoti.io/unicode/...>`. The include path sits beside ICU's
+`<unicode/...>` in any file that has both, which `ctang` will until §16 phase
+F; the `ghoti.io/` component keeps them apart at compile time and a reader has
+to be told.
+
+---
+
+## 1. What the library is for
+
+The brief is a correct, cross-platform, dependency-free C implementation of
+the parts of Unicode that a text-processing library needs, that an enterprise
+can build on, that every library in this suite uses rather than approximates,
+and that no future library here has to write again. Each word is a mechanism:
+
+| Property | Mechanism |
+| --- | --- |
+| **Correct** | Every table is generated from the Unicode Character Database at a pinned version, never typed (§5). Every algorithm is one the Standard specifies in a numbered annex and publishes a conformance file for, and that file is the gate (§12). Every property answer is checked **exhaustively** - all 1,114,112 codepoints - against a second source, not sampled (§12.1). |
+| **Cross-platform** | Tier 0 (§3) touches no operating-system API, reads no locale, opens no file. It is pure functions over integers and bytes and behaves identically everywhere by construction. There is no tier that touches the OS at all. |
+| **Dependency-free** | The only link dependency is `cutil`, for the allocator vtable, checked size arithmetic, and UTF-8/UTF-16 conversion. ICU is an *oracle* in the tests and is never linked (§12). CLDR is not shipped, not fetched, not read (§2 M6, §9). |
+| **Enterprise-ready** | No global state, no `setlocale`, no environment read (§3.6). Every function is reentrant over immutable `const` tables (§13.3). The data that answered a question is queryable - `guni_ucd_version()` - because "which Unicode version classified this string" is an audit question (§5.4). Symbols are namespaced per `CONVENTIONS.md` §4, so two versions can be loaded in one process. |
+| **Useful** | Three consumers exist today and their exact needs are enumerated in §11, with a fourth (`font`) designed against it. Both call shapes each consumer uses - set-oriented for a regex compiler, point-oriented for a shaper - come from one generator and are proven to agree (§4.2). |
+| **Reusable** | The generator is the asset, not any particular table. Adding a property is a change to `tools/ucd/gen_tables.py` and nothing else (§5.3). That is the mechanism behind "no future library does this again". |
+
+### 1.1 The shape is borrowed, deliberately
+
+ICU's `uchar.h`, `unorm2.h`, `ubrk.h` and `ubidi.h` are the reference for
+*what* a Unicode library exposes, and thirty years of consumers have found
+their shape workable. Where this library departs from ICU, §2 names the
+reason. Where it does not, the reader can assume the ICU semantics apply and
+the ICU conformance behaviour is the target.
+
+### 1.2 The threat model
+
+Input to this library is text the caller got from somewhere else. It may be
+invalid UTF-8, may contain surrogates, noncharacters, unassigned codepoints,
+private-use codepoints, values above `0x10FFFF` if the caller decoded badly,
+and sequences designed to make a normaliser or a bidi resolver allocate
+without bound. Every function therefore defines its behaviour for **every**
+32-bit input value (§4.4), every output is bounded by a documented expansion
+factor (§6.3), and every algorithm with a recursion or a stack has its depth
+fixed by the Standard and enforced (§7.2). Nothing here trusts its input, and
+nothing here can be made to read past a buffer by any input.
+
+---
+
+## 2. Mistakes this library exists not to repeat
+
+The suite's convention is that a rule names the defect it prevents. The first
+five are this suite's own; the rest are the field's.
+
+| # | The mistake | Where it happened | What `unicode` does instead |
+| --- | --- | --- | --- |
+| M1 | The same tables generated three times by three libraries, from three generators, with three version pins nothing checks | This suite: `regex` and `text` at UCD 17.0.0 by coincidence, `font` about to be the third | One generator, one pin, one committed output, and a suite-level check that every `UCD_VERSION` file agrees (§5.4) |
+| M2 | A tailoring decision baked into a shared table at generation time | `regex`'s generator applies UAX #14's LB1 while generating: `CJ` becomes `NS`, which *is* CSS `line-break: strict`; a layout engine needs the other two | Tables carry the unresolved classes; LB1 is a function the caller applies with a policy (§7.3) |
+| M3 | A UTF-16 API, so every UTF-8 program converts on the way in and out | ICU's `u_*` functions; `ctang`'s `u_strFromUTF8`/`u_strToUTF8` are half its ICU call sites | UTF-8 is the primary encoding; boundaries are byte offsets; a codepoint-array entry point stands beside it, and no UTF-16 API exists (§4.1) |
+| M4 | A conformance gate that skips when its data is absent, with no second gate | `regex`'s `test_break.cpp` skips without `third_party/ucd/`; defensible there because the Perl differential also exists, indefensible for a shared owner | The conformance files are committed; the gate cannot skip (§12.2) |
+| M5 | One consumer's call shape imposed on the next consumer | Would have been `font` looping a per-position query written for `regex` | Both shapes - point query and bulk iteration - are first-class and generated from one source (§4.2) |
+| M6 | Character data and locale data in one library, so linking one means shipping the other | ICU: 30 MB of data, most of it CLDR, needed by nobody who wanted a grapheme iterator | Unicode Character Database only. Locale tailorings arrive through provider vtables (§9), as `chron` §8.5 and `text`'s regex provider already do. `chron` §14 states the position: shipping CLDR is shipping ICU's problem |
+| M7 | Global mutable state: a process-wide locale, a default converter, a static break iterator | `setlocale`, `LC_CTYPE`-dependent `iswalpha`, ICU's default locale | No globals. No function reads the environment. State an algorithm needs lives in a caller-owned struct (§3.6) |
+| M8 | Undefined behaviour on an out-of-range codepoint | `towupper(0x110000)`; table lookups indexed by unchecked input | Every function defines its answer for all of `uint32_t` (§4.4): the Standard's answer up to `0x10FFFF`, `GUNI_ERR_INVALID` or the identity above it, never a read past a table |
+| M9 | Normalisation output that can grow without a stated bound | Callers guessing `2 * len` and overflowing on `U+FDFA` (NFKD: 18 codepoints) | Expansion factors per form are documented and checked (§6.3); output is caller-buffer with required-length reporting, `chron` §8.6's contract |
+| M10 | Invalid UTF-8 silently replaced, or silently accepted | Every decoder that emits `U+FFFD` without being asked; every one that passes surrogates through | A `GUNI_Invalid` policy on every UTF-8 entry point; zero is `REFUSE` (§4.3) |
+| M11 | A bidi resolver with no depth limit, or one that silently truncates | Pre-6.3 implementations without isolate handling; embedding stacks that overflow | UAX #9's `max_depth` of 125 is enforced as the Standard says, with the overflow behaviour the Standard specifies (§7.2) |
+| M12 | Enum values renumbered between data versions, so a stored property value changes meaning | Any library whose script enum is regenerated from a sorted list | Generated enums append and never renumber; the committed diff on upgrade is the review artifact (§5.5) |
+| M13 | Case mapping that is context-free when the Standard says it is not | `toupper('ß')` → `ß`; final sigma handled nowhere; Turkish `i` handled by locale side-effect | Full mappings with `SpecialCasing` conditions, context passed explicitly, and the three language-sensitive cases as an enum argument - which is UCD data, not CLDR (§8) |
+| M14 | Line breaking that claims to handle Thai | UAX #14 assigns class `SA` and says "use a dictionary"; libraries that resolve `SA` to `AL` and say nothing | `SA` runs go to a provider; without one there is no interior break, and the header says so in those words (§9.1) |
+| M15 | A "compatibility" character name lookup that cannot find `LATIN SMALL LETTER A` because of a hyphen | Implementations ignoring UAX #44-LM2 | Loose matching per UAX #44, as `regex` already does; kept in the tier-1 module (§10) |
+| M16 | Half a megabyte of character names linked by a program that wanted a grapheme iterator | Any monolithic Unicode library | Tiers (§3): names are tier 1, in their own translation units, behind their own header, and `make check-layering` keeps tier 0 from reaching them |
+
+---
+
+## 3. Tiers and modules
+
+Two tiers, split by what a consumer pays for. **Nothing in tier 0 includes a
+tier-1 header**, and `make check-layering` greps for it and fails naming the
+file, as `chron` does.
+
+| Tier | Holds | Needs | Consumers |
+| --- | --- | --- | --- |
+| 0 | every property, every algorithm | nothing: no OS, no file, no locale | `text`, `regex`, `font`, `ctang` |
+| 1 | character names, aliases, named sequences | nothing either - the split is about *size*, not dependencies | `regex` |
+
+Tier 1 exists because `tables_names.c` is 31,603 lines, more than half the
+generated bulk of everything being consolidated, and only `regex` has ever
+wanted it. In a shared library everything ships, and demand-paged `.rodata`
+means untouched tables cost address space rather than memory - but the split
+is still worth enforcing, because the next consumer who *does* want names
+should find them behind a header and not woven through `char.h`.
+
+### 3.1 The modules
+
+| Header | Module | Holds | Tier |
+| --- | --- | --- | :-: |
+| `core.h` | core | `GUNI_Result`, `GUNI_Limits`, the version query, `GUNI_Error` | 0 |
+| `utf.h` | encoding | UTF-8 decode/encode with the `GUNI_Invalid` policy; codepoint iteration; what `cutil`'s `utf.h` does not cover | 0 |
+| `char.h` | properties | general category, script, `Script_Extensions`, canonical combining class, East Asian Width, block, numeric type and value, the binary properties (`Alphabetic`, `White_Space`, `Extended_Pictographic`, ...), `Bidi_Class`, `Bidi_Mirrored` and the mirror, `Joining_Type`, `Joining_Group`, `Indic_Syllabic_Category`, `Indic_Positional_Category`, `Indic_Conjunct_Break`, `Vertical_Orientation`, the emoji properties, `Hangul_Syllable_Type`, `Line_Break` (unresolved), the four segmentation properties, decomposition type | 0 |
+| `set.h` | sets | the same properties as **range lists** for a regex compiler: "every codepoint whose script is Greek"; property-name and value-name lookup with UAX #44 loose matching | 0 |
+| `script.h` | script runs | script-run segmentation with `Script_Extensions` and paired-bracket handling: UTS #39's notion, which is also a shaper's itemiser | 0 |
+| `case.h` | case | simple and full upper, lower, title, fold; `SpecialCasing` conditions; the fold orbits `regex` needs for case-insensitive classes | 0 |
+| `norm.h` | normalisation | NFC, NFD, NFKC, NFKD; the quick-check properties; canonical ordering; Hangul composition and decomposition by algorithm | 0 |
+| `break.h` | segmentation | UAX #29 grapheme, word and sentence boundaries; UAX #14 line-break opportunities with LB1 exposed; point query and iterator forms; the `SA` provider seam | 0 |
+| `bidi.h` | bidirectional | UAX #9: paragraph level, resolved embedding levels, isolates, line reordering, mirroring | 0 |
+| `name.h` | names | UAX #44 character names including the algorithmic ones, name aliases, named sequences; name → codepoint with loose matching | **1** |
+| `unicode.h` | umbrella | everything in tier 0 | 0 |
+
+`vim_class.c` and the ECMAScript legacy case rules stay in `regex`: they are
+dialect features that happen to consume Unicode data, not Unicode services.
+IDNA2008 and UTS #46 stay in `text` for now (§15.3).
+
+---
+
+## 4. The API contract
+
+### 4.1 UTF-8 first, codepoints second, UTF-16 never
+
+Every algorithm has a UTF-8 entry point that takes `const char *, size_t` and
+reports positions as **byte offsets** into that buffer, and a codepoint entry
+point that takes `const uint32_t *, size_t` and reports indices. `regex`'s
+existing break API is already the first shape and `text`'s NFC is already the
+second; both are kept. There is no UTF-16 entry point: `cutil`'s `utf.h`
+converts, and a caller holding UTF-16 converts once at the edge rather than
+this library carrying a third copy of every function.
+
+Byte offsets are the natural currency of a layout engine's cluster map (a
+character range in the source string maps to glyphs) and of a regex engine's
+match positions, and they are what makes M3 go away.
+
+### 4.2 Two call shapes, one source
+
+A regex compiler asks *"which codepoints have Script=Greek"* and wants a list of
+ranges to build a class from. A shaper asks *"what is the script of U+03B1"* a
+million times a second and wants a constant-time answer. These are the same
+data in two layouts:
+
+- **`char.h` is point-oriented.** Each property is a function
+  `guni_<property>(uint32_t)` over a two-stage trie generated for it, three
+  dependent loads and no branch on the fast path.
+- **`set.h` is set-oriented.** Each property value is available as a sorted
+  array of `GUNI_Range { uint32_t first, last; }`, which is what `regex`'s
+  `GRX_CharRange` is today.
+
+Both are emitted by `gen_tables.py` from the same parsed UCD, and a test walks
+all 1,114,112 codepoints asserting that the trie's answer and the range list's
+membership agree for every property. That test is what makes it safe to keep
+two layouts: they cannot drift because they are not two sources.
+
+Segmentation likewise has both shapes: `guni_break_at()` answers one position
+(the `regex` shape, where the engine is already at an offset and asks whether
+it is a boundary), and `guni_break_iter_*()` walks a buffer (the `font` shape,
+where a paragraph is segmented once). The iterator is the primitive and the
+point query is defined in terms of it, so they cannot disagree either.
+
+### 4.3 Invalid input is a policy, and zero refuses
+
+Every UTF-8 entry point takes a `GUNI_Invalid`:
+
+```c
+typedef enum {
+  GUNI_INVALID_REFUSE = 0,   /* GUNI_ERR_INVALID, with the byte offset */
+  GUNI_INVALID_REPLACE,      /* U+FFFD per the maximal-subpart practice */
+  GUNI_INVALID_SKIP          /* drop the bytes; for diagnostics only */
+} GUNI_Invalid;
+```
+
+Zero refuses, following `chron` §3.7: a caller who wants leniency writes the
+word. `REPLACE` follows the Unicode Standard §3.9 "maximal subpart" recommendation
+(the same one WHATWG and Python use), so that `\xE1\x80` followed by ASCII
+produces one `U+FFFD`, not two - an implementation detail two libraries in the
+field disagree on and this one pins.
+
+Surrogate codepoints (`0xD800`-`0xDFFF`) encoded in UTF-8 are invalid, per the
+Standard, and are handled by the same policy; a caller with CESU-8 or WTF-8
+data converts at the edge.
+
+### 4.4 Every function answers for every `uint32_t`
+
+A property function called with any value up to `0x10FFFF` returns the
+Standard's answer, which for unassigned codepoints is `Cn`, `Unknown`,
+`Not_Reordered`, and so on - real values, not errors. Called with a value above
+`0x10FFFF`, a property function returns the same answer as for an unassigned
+codepoint and a mapping function returns its input; neither indexes a table
+with it. Functions that return a `GUNI_Result` return `GUNI_ERR_INVALID` for
+such a value. There is no input to any function in this library that produces
+undefined behaviour, and `tests/unit/test_range.cpp` calls every property
+function at `0`, `0x10FFFF`, `0x110000`, `0xFFFFFFFF` and every surrogate and
+noncharacter to prove it.
+
+### 4.5 Output contract
+
+Functions whose output length the caller cannot know in advance -
+normalisation, case mapping with full mappings, bidi reordering - follow
+`chron` §8.6: write into a caller buffer, report the length the output needs,
+return `GUNI_ERR_LIMIT` when the buffer is too small with `out_len` set to the
+requirement, and leave the buffer's contents unspecified on failure. There is
+no allocating variant in the first release. §6.3 gives the bounds a caller can
+size a buffer from without a preflight call.
+
+Functions over single codepoints - every property, every simple case mapping,
+the mirror - are pure, take no allocator, touch no buffer, and cannot fail.
+This is most of the library, and it is what makes tier 0 usable from a signal
+handler or a JIT's runtime, should either ever want it.
+
+### 4.6 Results
+
+`GUNI_Result` is the fixed vocabulary of `CONVENTIONS.md` §5 - `OK`, `ERR_INVALID`,
+`ERR_LIMIT`, `ERR_OOM`, `ERR_INTERNAL`, `ERR_UNSUPPORTED` - with no additions.
+`ERR_IO`, `ERR_FORMAT` and `ERR_CORRUPT` are in the enum for uniformity and
+nothing here returns them: the library reads no file and parses no format. A
+`GUNI_Error` carries a byte offset and the codepoint at fault, as `chron`'s
+`GCHRON_Error` carries a position (§7.3 there), because "invalid UTF-8
+somewhere" is not a diagnostic.
+
+---
+
+## 5. The data
+
+### 5.1 What is fetched and what is committed
+
+The Unicode Character Database is fetched by `tools/ucd/fetch.sh` into
+`third_party/ucd/<version>/`, which is gitignored, exactly as `regex` does
+today. The **generated tables are committed**, under `src/*/tables/`, because
+they are what a silent change would change the behaviour of, and a clone must
+build without network access. The **conformance files are committed too**,
+under `tests/data/ucd/<version>/`, which is the departure from `regex` (M4):
+`GraphemeBreakTest.txt`, `WordBreakTest.txt`, `SentenceBreakTest.txt`,
+`LineBreakTest.txt`, `NormalizationTest.txt`, `BidiTest.txt` and
+`BidiCharacterTest.txt`, about 8 MB together, under the Unicode License v3 with
+its notice in `tests/data/ucd/LICENSE`. A clone's `make test` runs every
+conformance gate with no fetch and no skip.
+
+The emoji data files (`emoji-data.txt`, `emoji-sequences.txt`,
+`emoji-zwj-sequences.txt`, `emoji-variation-sequences.txt`) are published
+alongside the UCD under `Public/emoji/` and `Public/<version>/ucd/emoji/`
+rather than in it, under the same licence; `fetch.sh` fetches them with the
+UCD and they are pinned to the same version, as they have been since Emoji 11
+tracked Unicode 11.
+
+### 5.2 `make check-ucd-tables`
+
+Regenerates every table into a scratch directory and fails when any committed
+file differs byte for byte, as `regex`'s `check-unicode-tables` and `text`'s
+equivalent do today. It is in `TEST_GATES`. This is the gate that catches an
+edited table, a generator change without a regeneration, and - on upgrade - is
+the thing that produces the diff a reviewer reads.
+
+### 5.3 The generator is the product
+
+`tools/ucd/gen_tables.py` is one script that parses every UCD file this library
+uses and emits every table. It is a direct descendant of `regex`'s
+`gen_tables.py`, which already handles the `;`-separated range syntax, the
+`@missing` lines, the derived-property files and the property-value alias
+resolution, and which is the part of the consolidation that moves with the
+least change.
+
+The rule that makes "no future library does this again" true: **adding a
+property is a change to the generator's property list and a new function in
+`char.h`, and nothing else.** No new file format, no new emission path, no new
+test harness - the exhaustive agreement test (§4.2) and the range fixture
+(§12.1) pick the new property up from the same list. If adding a property ever
+needs more than that, the generator has grown a special case and the special
+case is the bug.
+
+### 5.4 One version, one pin, queryable
+
+`tools/ucd/UCD_VERSION` holds the version, `17.0.0` at the time of writing.
+`fetch.sh` reads it, `gen_tables.py` embeds it, `guni_ucd_version()` returns it
+as a string and `guni_ucd_version_number()` as `GUNI_MAKE_VERSION(17, 0, 0)`,
+so that a consumer can log which Unicode version classified a string. That is
+an audit answer, for the same reason `chron`'s tzdata version is one.
+
+The suite-level check: `tools/check-ucd-pins.sh` in the workspace reads every
+`UCD_VERSION` in every library that has one and fails if they differ. Today
+that is `regex` and `text`; after §16 it is this library alone and the check is
+trivially true, which is the point.
+
+### 5.5 Upgrading Unicode
+
+When Unicode 18 is published, the process is a checklist, and it is written
+here so that it is followed rather than rediscovered:
+
+1. Change `UCD_VERSION`; run `tools/ucd/fetch.sh`.
+2. `make gen-ucd-tables`; read the diff. **Generated enums append and never
+   renumber** (M12): a new script lands at the end of `GUNI_Script`, and the
+   generator refuses to emit an enum whose existing members changed value,
+   comparing against the committed header.
+3. Copy the new conformance files into `tests/data/ucd/<version>/`; delete the
+   old directory.
+4. `make test`. Every conformance gate runs against the new files. A UAX
+   rule change - and there is one most years - fails here, in the algorithm
+   that needs updating, with the failing line from the Standard's own file.
+5. The exhaustive-sweep checksums (§12.1) *will* change; regenerate them and
+   commit. The range fixture's diff is the human-readable record of what
+   changed.
+6. Bump `MINOR_VERSION`. A Unicode upgrade is an observable behaviour change
+   in every consumer and is versioned as one.
+
+---
+
+## 6. Normalisation
+
+### 6.1 The four forms and the algorithm
+
+UAX #15's four forms - NFD, NFC, NFKD, NFKC - over the canonical and
+compatibility decomposition mappings, the canonical combining class ordering,
+the composition exclusions, and the algorithmic Hangul syllable
+composition/decomposition (Standard §3.12). `text` has NFC today; the other
+three are new, and NFD in particular is what a shaper needs to decompose a
+precomposed character into base plus mark when a font has the mark and not
+the composite.
+
+### 6.2 Quick check
+
+The `NFC_QC`, `NFD_QC`, `NFKC_QC` and `NFKD_QC` properties are exposed as
+`guni_norm_quick_check(form, text)` returning `YES`, `NO` or `MAYBE` per UAX
+#15 §9, so that a caller can skip normalising text that is already normalised -
+which is nearly all text. A `MAYBE` means the full algorithm runs; the function
+never guesses.
+
+### 6.3 Bounds
+
+The expansion of one codepoint under each form is bounded by the data, and the
+bound is a generated constant a caller can size a buffer from without a
+preflight:
+
+| Form | Max codepoints out per codepoint in | Witness |
+| --- | ---: | --- |
+| NFD | 4 | `U+1F82` |
+| NFC | 3 | composition can leave decomposed marks behind |
+| NFKD | 18 | `U+FDFA` ARABIC LIGATURE SALLALLAHOU ALAYHE WASALLAM |
+| NFKC | 18 | the same |
+
+`GUNI_NORM_MAX_EXPANSION_NFD` and its three siblings are emitted by the
+generator from the actual data and checked by a test that decomposes every
+codepoint. `text`'s `nfc.c` today carries `4 * len` as a comment; here it is a
+constant that would fail a build if the data ever exceeded it.
+
+### 6.4 Stream-safe text
+
+UAX #15 §13's Stream-Safe Text Format - at most 30 non-starters in a row - is
+what makes normalising a stream in bounded memory possible. The library exposes
+the check and the transform (`guni_norm_stream_safe()`), and its own
+normaliser accepts text that is not stream-safe, because refusing real input
+is not an option, but bounds its working buffer by the input length times the
+form's expansion factor rather than by the run of non-starters.
+
+---
+
+## 7. Segmentation, line breaking and bidi
+
+### 7.1 UAX #29 and UAX #14
+
+The grapheme, word and sentence boundary rules of UAX #29 and the line-break
+opportunities of UAX #14, at the pinned Unicode version, exactly as
+`regex/src/unicode/break.c` implements them today: the rule tables, the
+`Extended_Pictographic` and regional-indicator handling, GB9c's
+`Indic_Conjunct_Break`, the East Asian Width consultation in LB19a and LB30.
+That code moves in essentially unchanged; what changes is described in the
+next two subsections.
+
+### 7.2 UAX #9
+
+New. The bidirectional algorithm, Unicode 6.3 and later: paragraph level
+determination (P1-P3), explicit embeddings and isolates (X1-X10) with the
+`max_depth` of 125 and the overflow counters the Standard specifies, weak
+types (W1-W7), neutrals and isolates (N0-N2, including the paired-bracket
+algorithm of BD16), implicit levels (I1-I2), and the per-line steps (L1-L4):
+trailing whitespace reset, reordering, and mirroring.
+
+The API takes a paragraph as codepoints or UTF-8 and a requested direction
+(`LTR`, `RTL`, or `AUTO` for P2/P3), writes one resolved level per input
+character into a caller buffer, and separately reorders one line given the
+levels and the line's bounds. Levels are kept rather than the reordered text,
+because a layout engine reorders *glyph runs*, not characters, and needs the
+levels to do it. `guni_bidi_mirror(cp)` is the `Bidi_Mirroring_Glyph` lookup
+for L4.
+
+Two conformance files gate it and both are exhaustive over their domain:
+`BidiTest.txt` enumerates every sequence of bidi classes up to a length and
+gives levels and reorderings for each of the three paragraph directions;
+`BidiCharacterTest.txt` does the same over real codepoints, which is what
+exercises the bracket-pair rule.
+
+### 7.3 LB1 is the caller's, and `SA` is a provider's
+
+This is M2 and it is the one substantive change to the code that moves.
+
+UAX #14's rule LB1 resolves five classes "that cannot be determined from the
+character alone": `AI`, `SG` and `XX` become `AL`; `SA` becomes `CM` or `AL`
+by general category; `CJ` becomes `NS` **or `ID`, at the implementation's
+choice** - and that choice is what CSS's `line-break` property exposes as
+`strict` (`NS`), `normal` and `loose` (`ID`, with further tailorings). `regex`
+resolves all five at table-generation time and picks `NS`. Correct for its
+`\b{lb}`, which follows Perl; wrong for a layout engine that must offer all
+three.
+
+So: the generated `Line_Break` table carries the raw classes.
+`guni_lb_resolve(class, general_category, GUNI_LineBreakTailoring)` applies LB1
+with the caller's choice, and the iterator takes the tailoring as an argument.
+`regex` passes `STRICT` and its behaviour is byte-identical, which §12.3's
+pairwise sweep proves.
+
+`SA` - Thai, Lao, Khmer, Myanmar, and the other South-East Asian scripts that
+write without spaces - resolves to `AL` under LB1 and therefore has **no
+interior line-break opportunity at all**. That is what the Standard says to do
+absent a dictionary, and it is useless for those scripts. The iterator
+therefore takes an optional `GUNI_BreakProvider` (§9.1) which is handed each
+maximal run of `SA` characters and returns the break opportunities within it.
+Without one, the behaviour is the Standard's default, and the header says in
+those words that a Thai paragraph will not wrap.
+
+### 7.4 Segmentation state is the caller's
+
+An iterator is a caller-owned struct initialised by `guni_break_iter_init()`,
+holding the kind, the tailoring, the provider, and its position. No allocation;
+no hidden state; two iterators over one buffer do not interact.
+
+---
+
+## 8. Case
+
+Simple mappings (one codepoint to one) and full mappings (one to up to three,
+per `SpecialCasing.txt`) for upper, lower, title and fold; `Changes_When_*`
+properties; and the `SpecialCasing` **conditions**, which are the part every
+`toupper` gets wrong (M13):
+
+- `Final_Sigma` needs the surrounding text; the full-mapping functions take the
+  whole buffer and a position, not a codepoint.
+- `tr`/`az` dotted and dotless `i`, and `lt` with its combining dot above, are
+  the three language-sensitive rules **in UCD's own data file**. They are a
+  `GUNI_CaseTailoring { NONE = 0, TURKIC, LITHUANIAN }` argument. This is not
+  CLDR: the rules are in `SpecialCasing.txt`; CLDR adds nothing to them but
+  the decision of when to apply them, and that decision is the caller's.
+
+Fold orbits - every codepoint that folds to the same value, which is what a
+case-insensitive character class needs - are `guni_case_orbit()`, moved from
+`regex` with its `GRX_FoldKind` axis (simple, full, and the ECMAScript legacy
+rules stay behind in `regex` as a dialect concern).
+
+---
+
+## 9. Provider seams
+
+Where the Standard defers to data this library does not ship, the seam is a
+vtable the caller fills, following `chron` §8.5 and `text`'s
+`GTEXT_JSON_Regex_Provider`. The library defines the interface, ships nothing
+behind it, and the dependency decision stays with the application. An
+application that links ICU for its own reasons - `ctang` does - fills each
+seam with ICU in a dozen lines.
+
+### 9.1 `GUNI_BreakProvider`
+
+Dictionary-based word breaking for the `SA` scripts (§7.3). One function:
+given a run of codepoints known to be a single `SA` script, fill an array of
+break positions. ICU's `brkitr` dictionaries, `libthai`, or an application's
+own list all fit behind it.
+
+### 9.2 `GUNI_SentenceSuppressions`
+
+UAX #29's sentence rules break after `Mr.`; CLDR's per-locale suppression lists
+say not to. A provider that answers "is this a suppression" for a run ending in
+a terminator. Low priority: layout rarely segments sentences.
+
+### 9.3 What is *not* a seam
+
+Collation, transliteration, charset conversion, number and date formatting,
+plural rules and display names have no seam, because nothing in this suite has
+asked and a seam nobody fills is an API promise nobody tests.
+
+---
+
+## 10. Names (tier 1)
+
+UAX #44 character names, including the algorithmically derived ones (Hangul
+syllables by the Jamo short names, CJK unified ideographs and Tangut by
+codepoint), name aliases (correction, control, alternate, figment,
+abbreviation), named sequences, and the reverse lookup with UAX #44-LM2 loose
+matching (ignore case, whitespace, hyphens, with the `HANGUL JUNGSEONG O-E`
+exception). This is `regex`'s `names.c` and `tables_names.c`, moved. It is in
+its own translation units behind `name.h`, tier 1, and nothing in tier 0
+includes it.
+
+---
+
+## 11. The consumers, and what each one needs
+
+| Consumer | Uses | Modules | Migration note |
+| --- | --- | --- | --- |
+| `regex` | properties as range lists for `\p{...}`; the four segmentations for `\b{gcb}` etc.; fold orbits; names for `\N{...}`; script runs for `(*sr:...)` | `set`, `break` (with `STRICT`), `case`, `name`, `script` | Deletes `src/unicode/` except `vim_class.c`; its own tables go; `test_unicode.cpp` and `test_break.cpp` move here. Applies LB1 itself (§7.3) |
+| `text` | NFC for IDNA and YAML; `Bidi_Class`, `Joining_Type`, `Hangul_Syllable_Type`, combining class for the IDNA validity rules | `norm`, `char` | Deletes `nfc.c`, `nfc_utf8.c`, `nfc_tables.c`; keeps `idna.c` and its two mapping tables (§15.3) |
+| `ctang` | grapheme cluster boundaries for its string type | `break` | Replaces `UBRK_CHARACTER` and the two UTF-16 conversions in `src/unicodeString.c`; ICU leaves the suite |
+| `font` | script itemisation; bidi levels and reordering; grapheme boundaries for the cluster map; line-break opportunities with all three tailorings and the `SA` seam; NFD for mark decomposition; joining, Indic, USE, emoji and vertical-orientation properties for the shapers | `script`, `bidi`, `break`, `norm`, `char` | Designed against it; `libs/font/documentation/design.md` |
+
+`chron` needs nothing: its formatter's names come from a provider and are
+already case-correct as provided. `image`, `compress`, `model` and `cjelly`
+need nothing directly; `cjelly` reaches it through `font`.
+
+---
+
+## 12. Correctness: oracles and tests
+
+The principle from `regex`'s `testing.md` and `chron` §12 applies: **the oracle
+is the authority, and every vector is generated from one, never written from
+memory.** For Unicode the Consortium publishes the oracle, which makes this the
+best-instrumented domain in the suite - and the domain is finite, which makes
+exhaustive checking the norm rather than the exception.
+
+| Claim | Oracle | Driver | Exhaustive? | Image |
+| --- | --- | --- | --- | --- |
+| every property of every codepoint | the UCD files themselves, re-read by an independent parser in the test (not `gen_tables.py`), and **Python's `unicodedata` module** as a second opinion where it exposes the property | `tests/unit/test_sweep.cpp`; `tools/oracle/unicodedata_diff.py` | **yes** - 1,114,112 codepoints per property | `python`, stock, by digest - see §12.6 for the UCD-version caveat |
+| the trie and the range list agree | each other | `tests/unit/test_sweep.cpp` | yes | none: in-process |
+| grapheme, word, sentence, line boundaries | `GraphemeBreakTest.txt`, `WordBreakTest.txt`, `SentenceBreakTest.txt`, `LineBreakTest.txt` | `tests/conformance/test_break.cpp` | the files enumerate every rule interaction | none: the files are committed |
+| the same, second opinion | **ICU** `ubrk_*` in the root locale, over generated strings | `tools/oracle/icu_break.cpp`, `make check-oracle-icu` | random, seeded | `icu`, built here: the driver links only ICU and is compiled inside its image, as `regex`'s `pcre2_match` is |
+| normalisation | `NormalizationTest.txt` - every codepoint with a decomposition, in all four forms, plus the invariants of its Part 1 over *every other* codepoint | `tests/conformance/test_norm.cpp` | **yes**, by the file's own design | none |
+| bidi | `BidiTest.txt` and `BidiCharacterTest.txt` | `tests/conformance/test_bidi.cpp` | the first is exhaustive over class sequences | none |
+| case mapping | `UnicodeData.txt` and `SpecialCasing.txt` re-read; Python `str.upper()`/`lower()`/`casefold()` | `test_sweep.cpp`; `unicodedata_diff.py` | yes for simple mappings | `python` |
+| names | `UnicodeData.txt` and `NameAliases.txt` re-read; Python `unicodedata.name()`/`lookup()` | as above | yes | `python` |
+| UTF-8 decoding | the Standard's Table 3-7 well-formed byte ranges, enumerated; the maximal-subpart examples in §3.9 | `tests/unit/test_utf.cpp` | every 1-, 2-, 3- and 4-byte sequence pattern | none |
+
+### 12.1 The exhaustive sweep is a committed artifact
+
+For every property, the sweep over all 1,114,112 codepoints is canonicalised to
+text and hashed; **the hash per property is committed** in
+`tests/data/sweep/<version>.sums`. A second, human-readable fixture commits the
+answer at the four codepoints around every range boundary in every table
+(`first-1`, `first`, `last`, `last+1`), which is where table-compression bugs
+live and which is small enough to read in a diff. `make test` regenerates both
+and compares. On a Unicode upgrade both change by design, and the boundary
+fixture's diff is the record of what.
+
+This is the machinery that makes migrating `regex` and `text` safe (§16
+phases D and E): before either migration, the sweep is run against *their*
+implementations and the sums committed; after, the sums must match.
+
+### 12.2 The gates cannot skip
+
+The conformance files are committed (§5.1), so `make test` on a fresh clone
+runs every gate. The ICU and Python differentials are the ones that can be
+absent, and a run without them says how many comparisons it could not make,
+never nothing.
+
+### 12.3 The gates are themselves tested
+
+Every gate here has been *observed to fail* before it is trusted, per `chron`
+§12.3 and this suite's history. Specifically, before the migration commits:
+
+- flip one entry in one generated table → the sweep sum fails and the boundary
+  fixture names the codepoint;
+- resolve `CJ` to `ID` in the table → the **pairwise Line_Break class sweep**
+  (every ordered pair of classes, several codepoints per class, old
+  implementation against new) fails and names the pair. The conformance file
+  alone does *not* catch this, because it tests the `strict` resolution;
+- delete one rule from `break.c` → the conformance file fails on its line.
+
+### 12.4 The oracles run in containers
+
+`notes/suite/CONTAINERS.md` §2 and §4 record the pattern, prototyped and
+measured on `regex`, and this library adopts it unchanged rather than
+inventing a second one: `tools/oracle/containers/IMAGES` pins every reference
+(stock images by digest, built-here images by every input they read plus a
+run-time version check); `tools/oracle/oracle_env.py` is the one place a
+reference is spelled; `tools/oracle/oracle_run.py` resolves the reference,
+prints `oracle(container): <version>` above the numbers, and refuses to run a
+gate whose reference is not the one `IMAGES` names. `ORACLE_MODE` is
+`container` or `host` with **no silent fallback**; the repository is mounted
+read-only at its own host path with `--network none`; every driver speaks the
+batch protocol, because a container costs 200 ms per gate and would be fatal
+per case. The conformance gates in `tests/conformance/` need no container:
+their files are committed (§5.1) and they run in `make test`.
+
+Two things are specific to Unicode oracles:
+
+- **An oracle's Unicode version is the pin that matters**, and it is rarely
+  ours. CPython's `unicodedata` tracks the interpreter release (3.13 carries
+  15.1, 3.14 carries 16.0); ICU tracks its own (ICU 78 carries 17.0). So an
+  oracle's `IMAGES` entry names its UCD version beside its own, and
+  `unicodedata_diff.py` **compares only codepoints whose `DerivedAge.txt` age
+  is at most the oracle's UCD version**, counting the rest as *not comparable*
+  in its output rather than as agreement. An oracle that carries this
+  library's exact UCD version - node 22's ICU 78.2 for segmentation, per the
+  `regex` prototype - is the one to prefer for that reason, and the comparison
+  is then total.
+- **The ICU driver builds inside its image** against the image's ICU alone,
+  as `regex`'s `pcre2_match` builds against pcre2 alone, so that the reference
+  cannot reach the implementation it answers for.
+
+### 12.5 Fuzzing
+
+`tests/fuzz/fuzz_utf.cpp` (the decoder under every policy),
+`fuzz_norm.cpp` (all four forms, the first byte selecting one; the property
+that `NFx(NFx(s)) == NFx(s)` and that the output is stream-safe when the input
+was), `fuzz_break.cpp` (every kind and tailoring; the property that
+boundaries are monotone and that the point query agrees with the iterator),
+`fuzz_bidi.cpp` (every direction; the property that levels are within range
+and reordering is a permutation), `fuzz_case.cpp`. Under ASan and UBSan, with
+the limits driven by the options byte per `CONVENTIONS.md` §7.
+
+### 12.6 Properties
+
+Beyond the vectors, invariants checked over random input:
+
+1. `NFC(NFD(s)) == NFC(s)` and the three other compositions of forms UAX #15
+   §7 guarantees.
+2. Every boundary the point query reports, the iterator reports, and vice
+   versa.
+3. `fold(upper(s)) == fold(lower(s)) == fold(s)`.
+4. Bidi levels are `0..125`, reordering is a permutation, and an all-LTR
+   paragraph reorders to the identity.
+
+---
+
+## 13. Code layout
+
+```
+include/ghoti.io/unicode/
+  macros.h  libver.h  libver_gen.h  namespace.h  allocator.h     (CONVENTIONS §4)
+  core.h        GUNI_Result, GUNI_Limits, GUNI_Error, version                 [tier 0]
+  utf.h         decode/encode, GUNI_Invalid                                    [tier 0]
+  char.h        every per-codepoint property                                   [tier 0]
+  set.h         properties as GUNI_Range lists; name/value lookup              [tier 0]
+  script.h      script-run segmentation                                        [tier 0]
+  case.h        mappings, conditions, tailorings, orbits                       [tier 0]
+  norm.h        the four forms, quick check, stream-safe                       [tier 0]
+  break.h       UAX #29 ×3, UAX #14, LB1, iterator, GUNI_BreakProvider         [tier 0]
+  bidi.h        UAX #9                                                         [tier 0]
+  name.h        UAX #44 names                                                  [tier 1]
+  unicode.h     umbrella for tier 0
+src/
+  core/  utf/  char/  set/  script/  case/  norm/  break/  bidi/  name/
+    each with <module>_internal.h and tables/ where generated
+tools/ucd/
+  fetch.sh  gen_tables.py  test_gen.py  UCD_VERSION
+tools/oracle/
+  unicodedata_diff.py  icu_break.cpp
+tests/
+  unit/  conformance/  fuzz/  data/ucd/<version>/  data/sweep/
+```
+
+### 13.1 Allocation
+
+Tier 0's property, case-simple, mirror and quick-check functions allocate
+nothing and take no allocator. Normalisation, full case mapping and bidi
+write to caller buffers (§4.5). The one place an allocator appears is the
+`_with_allocator` variant of the bidi resolver for paragraphs longer than a
+caller wants on the stack, and it uses `GUNI_Allocator`, a typedef of
+`GCU_Allocator` per `CONVENTIONS.md` §5.
+
+### 13.2 Limits
+
+`GUNI_Limits` caps `max_text_bytes` (default 64 MiB), `max_bidi_depth` (fixed
+at 125 by the Standard and not raisable), and `max_nonstarters` for the
+stream-safe transform (30, per UAX #15). Every function that walks a buffer
+takes one; `NULL` means default.
+
+### 13.3 Threads
+
+Every table is `const` and every function is reentrant. Iterators and bidi
+state are caller-owned structs. There is no shared mutable state anywhere in
+the library, and no function acquires a lock.
+
+---
+
+## 14. Non-goals for the first stable release
+
+- **CLDR data**, in any form (M6). Collation, transliteration, formatting,
+  plural rules, display names, locale-specific tailorings beyond the three in
+  `SpecialCasing.txt`.
+- **Charset conversion** other than UTF-8/UTF-16/UTF-32.
+- **Dictionaries** for `SA` word breaking (§9.1 is the seam).
+- **IDNA and UTS #46** (§15.3).
+- **Regular-expression syntax** for properties (`\p{...}` parsing is `regex`'s;
+  this library exposes the name lookup it needs).
+- **Unicode Security Mechanisms** (UTS #39 confusables), beyond the script-run
+  detection that already exists. A reasonable module for a second release.
+
+---
+
+## 15. Decisions
+
+Listed so that they were decided on purpose. The first three were put to the
+author and answered on 2026-09-24; the rest stand as recommended.
+
+1. **The library exists, and is built before `font`, and `text` and `regex`
+   migrate to it before `font` starts.** Decided. The staged alternative -
+   build `font`'s tables inside `font` and converge later - was rejected
+   because "converge when touched" never fires for generated data, and because
+   an API designed against one consumer is the wrong API.
+2. **`unicode` is the name.** Decided, with the ICU-adjacency caveat in the
+   preamble. `ucd` would undersell a library that holds algorithms.
+3. **Names move, as tier 1.** Decided. The alternative leaves 31,603 lines in
+   `regex` for the next consumer to write again.
+4. **IDNA and UTS #46 stay in `text`.** Recommended. A Unicode standard, but
+   about host names, and one consumer is not a library. Revisit on a second.
+5. **LB1 is applied by the caller.** §7.3. The alternative - two tables, one
+   per tailoring - doubles the data to avoid one function call.
+6. **Script runs move.** `regex`'s `script_run.c` implements UTS #39's
+   notion, which with `Script_Extensions` and bracket pairing is also a
+   shaper's itemiser; one implementation serves both, in `script.h`.
+7. **Zero refuses** on the invalid-UTF-8 policy (§4.3), on the case tailoring
+   (`NONE`), and on the line-break tailoring (`STRICT` is zero because it is
+   the Standard's own worked example and `regex`'s existing behaviour, not
+   because it is stricter).
+8. **No UTF-16 API.** §4.1. `cutil` converts.
+9. **The conformance files are committed.** §5.1, M4.
+10. **Emoji data is pinned to the UCD version.** They have tracked each other
+    since Emoji 11; if they ever diverge, `fetch.sh` gains a second pin.
+
+---
+
+## 16. Plan
+
+Phases, in dependency order, with the milestone each unlocks. Sizes follow
+`regex`'s `plan.md` and `chron`: S up to a week, M two to four, L four to
+eight, for one engineer who knows the suite. Phases A-C build the library;
+D-F migrate its consumers; nothing in `font` that needs Unicode starts before
+E. (`font`'s tiers 0 and 1 - file parsing, outlines, rasterisation - need no
+Unicode at all and can proceed in parallel from phase B onward; see
+`libs/font/documentation/design.md` §17.)
+
+| Phase | Work | Size | Gate | Unlocks |
+| --- | --- | --- | --- | --- |
+| **A** | Scaffold from `model` per `CONVENTIONS.md` §12; `core.h`, `utf.h`; `tools/ucd/` with `fetch.sh`, `gen_tables.py` (ported from `regex`), `UCD_VERSION`; the committed conformance files; `char.h` and `set.h` with their tables; the exhaustive sweep (§12.1) and the trie/range agreement test; `check-ucd-tables`, `check-layering`, `check-symbols`; the suite-level `check-ucd-pins.sh` | M | sweep sums match `regex`'s `property.c` for every property both have; every gate observed to fail once | **U1: a library exists that answers every property for every codepoint, provably identically to what `regex` answers today** |
+| **B** | The modules nobody has: `norm.h` in all four forms with quick-check and the expansion constants; `bidi.h`; the shaping properties in `char.h` (joining, Indic, USE inputs, emoji, vertical orientation, mirroring) | L | `NormalizationTest`, `BidiTest`, `BidiCharacterTest`, all committed, all passing; the sweep extended to the new properties | **U2: `font`'s shaping tier has every Unicode input it needs** |
+| **C** | Move `break.c`, `case.c`, `display.c`, `script_run.c` and `names.c` with their tables into `break.h`, `case.h`, `char.h`, `script.h`, `name.h`; **LB1 exposed** (§7.3); the iterator form; `GUNI_BreakProvider`; the pairwise Line_Break sweep against the pre-move `regex` build; `test_unicode.cpp` and `test_break.cpp` move here | M | the four UAX #29/#14 files; the pairwise sweep byte-identical under `STRICT`; the ICU differential | **U3: every algorithm `regex` had, with its tailoring axis opened** |
+| **D** | Migrate `text`: `nfc.c`, `nfc_utf8.c`, `nfc_tables.c` deleted; IDNA's validity checks read `char.h`; `workspace.txt` gains `unicode` on `text`'s line | S | `text`'s 1,534 tests unchanged; its NFC oracle script unchanged; the sweep sums for the composition tables unchanged | **U4: first consumer migrated; the API has survived a second consumer** |
+| **E** | Migrate `regex`: `src/unicode/` reduced to `vim_class.c` and the ECMAScript legacy rules; `regex` applies LB1 with `STRICT`; `\p{...}`, `\N{...}`, `\b{...}` and `(*sr:...)` over this library; `workspace.txt` updated | M | `regex`'s 484 tests and 33,829 vectors unchanged; the Perl differential unchanged; the pairwise sweep unchanged | **U5: the duplicate is gone; three libraries, one Unicode** |
+| **F** | `ctang`: `src/unicodeString.c` calls `guni_break_iter_*` for graphemes; the UTF-16 conversions and the ICU dependency removed; `workspace.txt` and the Makefile's dependency block updated | S | `ctang`'s 174 test executions unchanged; `pkg-config icu-uc` no longer required by any library | **U6: ICU is not linked by anything in the suite** |
+
+Each phase ends with `make test`, `test-valgrind`, `test-asan`, `fuzz` and
+`check-symbols` clean from an empty build directory, serially and under `-j`,
+per `CONVENTIONS.md` §12 item 10. D, E and F are each independently
+deferrable: nothing in a later phase depends on an earlier migration having
+landed, and old code is deleted only once the new path passes.
+
+**What is deliberately absent at the end of F:** everything in §14. The
+absent things are absent, not stubbed: there is no `guni_collate()` that
+returns `ERR_UNSUPPORTED`, because a function that exists and refuses is a
+promise the tests do not check.
+
+---
+
+## References
+
+- The Unicode Standard, Version 17.0, Core Specification: §3.9 (UTF-8, maximal
+  subparts), §3.11-3.13 (normalisation and case), Chapter 5.
+- UAX #9, Unicode Bidirectional Algorithm. UAX #14, Line Breaking Properties.
+  UAX #15, Unicode Normalization Forms. UAX #29, Unicode Text Segmentation.
+  UAX #44, Unicode Character Database. UTS #39, Unicode Security Mechanisms
+  (script runs). UTS #51, Unicode Emoji.
+- Unicode License v3, for the data and conformance files.
+- `CONVENTIONS.md` §4 (namespacing), §5 (the API contract), §7 (tests), §12
+  (the checklist for a new library).
+- `libs/chron/documentation/design.md` §3.7 (zero refuses), §8.5 (providers),
+  §8.6 (output contract), §12.3 (gates observed to fail), §14 (no CLDR).
+- `libs/regex/src/unicode/` and `tools/unicode/`, the code that moves.
+- `notes/suite/UNICODE-LIBRARY.md`, the decision record.

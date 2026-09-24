@@ -1,0 +1,7 @@
+Name: Ghoti.io Unicode(BRANCH)
+Description: Unicode: character properties, normalisation, segmentation, line breaking, bidi, case mapping
+Version: (VERSION)
+URL: https://github.com/coreyp1/unicode
+Libs: -L(PC_LIB_DIR) -l(SUITE)-(PROJECT)(BRANCH)
+CFlags: -I(PC_INCLUDE_DIR)
+Requires: (REQUIRES)
