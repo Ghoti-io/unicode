@@ -1170,6 +1170,25 @@ code figure was under by exactly as much. Neither number reproduced, which is
 the only reason it was caught: a figure whose instrument is not written beside
 it cannot be checked, so the commands are here now.
 
+**`display.c` did not move, and the phase C row above no longer says it did.**
+It was listed as moving and never was. Measured rather than assumed: its table
+is vim 9.1's, from `strdisplaywidth()` over all 1,114,112 codepoints, and it is
+not East_Asian_Width. Against this library's `guni_east_asian_width()` it
+disagrees on **362 codepoints** - 198 vim draws in two cells that Unicode calls
+neither Wide nor Fullwidth (165 of them emoji, 31 C0 controls vim renders as
+`^X`), and 164 Unicode calls Wide or Fullwidth that vim draws in one (145 of
+them `Other_Letter`, mostly Tangut and Khitan, where vim's table simply lags).
+Its zero-width column is a strict subset of `Mn | Me | Cf`, 2,033 of that
+property's 2,242 members, so it is not that property either.
+
+A table versioned by vim rather than by the UCD does not belong here: this
+library has one pin, `tools/ucd/UCD_VERSION`, `check-ucd-tables` gates every
+table by regenerating it from the UCD, and `tools/check-ucd-pins.sh` exists to
+prove three libraries agree on one Unicode version. A second data version
+inside the library defeats all three. The Unicode part of the question,
+East_Asian_Width, is here already; the vim part is a dialect feature and its
+home is still open - see `notes/suite/UNICODE-LIBRARY.md`.
+
 **What is deliberately not done**, from the phase rows below: the comparison of
 the sweep sums against `regex`'s own `property.c`, and the pairwise Line_Break
 sweep against a pre-move `regex` build. Both are differentials against a
@@ -1198,7 +1217,7 @@ that they agree.
 | --- | --- | --- | --- | --- |
 | **A** | Scaffold from `model` per `CONVENTIONS.md` §12; `core.h`, `utf.h`; `tools/ucd/` with `fetch.sh`, `gen_tables.py` (ported from `regex`), `UCD_VERSION`; the committed conformance files; `char.h` and `set.h` with their tables; the exhaustive sweep (§12.1) and the trie/range agreement test; `check-ucd-tables`, `check-layering`, `check-symbols`; the suite-level `check-ucd-pins.sh` | M | sweep sums match `regex`'s `property.c` for every property both have; every gate observed to fail once | **U1: a library exists that answers every property for every codepoint, provably identically to what `regex` answers today** |
 | **B** | The modules nobody has: `norm.h` in all four forms with quick-check and the expansion constants; `bidi.h`; the shaping properties in `char.h` (joining, Indic, USE inputs, emoji, vertical orientation, mirroring) | L | `NormalizationTest`, `BidiTest`, `BidiCharacterTest`, all committed, all passing; the sweep extended to the new properties | **U2: `font`'s shaping tier has every Unicode input it needs** |
-| **C** | Move `break.c`, `case.c`, `display.c`, `script_run.c` and `names.c` with their tables into `break.h`, `case.h`, `char.h`, `script.h`, `name.h`; **LB1 exposed** (§7.3); the iterator form; `GUNI_BreakProvider`; the pairwise Line_Break sweep against the pre-move `regex` build; `test_unicode.cpp` and `test_break.cpp` move here | M | the four UAX #29/#14 files; the pairwise sweep byte-identical under `STRICT`; the ICU differential | **U3: every algorithm `regex` had, with its tailoring axis opened** |
+| **C** | Move `break.c`, `case.c`, `script_run.c` and `names.c` with their tables into `break.h`, `case.h`, `char.h`, `script.h`, `name.h`; **LB1 exposed** (§7.3); the iterator form; `GUNI_BreakProvider`; the pairwise Line_Break sweep against the pre-move `regex` build; `test_unicode.cpp` and `test_break.cpp` move here | M | the four UAX #29/#14 files; the pairwise sweep byte-identical under `STRICT`; the ICU differential | **U3: every algorithm `regex` had, with its tailoring axis opened** |
 | **D** | Migrate `text`: `nfc.c`, `nfc_utf8.c`, `nfc_tables.c` deleted; IDNA's validity checks read `char.h`; `workspace.txt` gains `unicode` on `text`'s line | S | `text`'s 1,534 tests unchanged; its NFC oracle script unchanged; the sweep sums for the composition tables unchanged | **U4: first consumer migrated; the API has survived a second consumer** |
 | **E** | Migrate `regex`: `src/unicode/` reduced to `vim_class.c` and the ECMAScript legacy rules; `regex` applies LB1 with `STRICT`; `\p{...}`, `\N{...}`, `\b{...}` and `(*sr:...)` over this library; `workspace.txt` updated | M | `regex`'s 484 tests and 33,829 vectors unchanged; the Perl differential unchanged; the pairwise sweep unchanged | **U5: the duplicate is gone; three libraries, one Unicode** |
 | **F** | `ctang`: `src/unicodeString.c` calls `guni_break_iter_*` for graphemes; the UTF-16 conversions and the ICU dependency removed; `workspace.txt` and the Makefile's dependency block updated | S | `ctang`'s 174 test executions unchanged; `pkg-config icu-uc` no longer required by any library | **U6: ICU is not linked by anything in the suite** |
