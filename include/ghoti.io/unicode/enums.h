@@ -1104,6 +1104,17 @@ typedef enum {
 #define GUNI_NORM_MAX_EXPANSION_NFKC 18
 
 /**
+ * @brief The longest character name, in bytes, without its NUL.
+ *
+ * Generated from the data: a caller sizes a buffer as
+ * GUNI_NAME_MAX_LENGTH + 1 and never asks twice.
+ */
+#define GUNI_NAME_MAX_LENGTH 88
+
+/// @brief The most codepoints a named sequence has.
+#define GUNI_SEQUENCE_MAX_LENGTH 4
+
+/**
  * @brief Words of bitset in a script-run check.
  *
  * One bit per script, plus three for UTS #39 section 5.1's

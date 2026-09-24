@@ -1,10 +1,9 @@
 # The design of ghoti.io-unicode
 
-**Status:** phases A and B are built, and so is phase C but for the names -
-`core.h`, `utf.h`, `char.h`, `set.h`, `norm.h`, `bidi.h`, `break.h`,
-`case.h`, `script.h`, the generator, the exhaustive sweep, and the
-conformance gates for normalisation, bidi and all four segmentations.
-`name.h` (tier 1) is what is left of C; then the migrations, D to F. This page
+**Status:** phases A, B and C are built - every module in §3.1, both tiers,
+the generator, the exhaustive sweep, and the conformance gates for
+normalisation, bidi and all four segmentations. What is left is the
+migrations, D to F, and they are the consumers' own commits. This page
 says what will exist and why, so that the code can be judged against it
 rather than the other way round. A change of mind lands here first, in the
 same commit as the code that needs it (`CONVENTIONS.md` §9), and §16 marks
@@ -629,12 +628,43 @@ asked and a seam nobody fills is an API promise nobody tests.
 
 UAX #44 character names, including the algorithmically derived ones (Hangul
 syllables by the Jamo short names, CJK unified ideographs and Tangut by
-codepoint), name aliases (correction, control, alternate, figment,
-abbreviation), named sequences, and the reverse lookup with UAX #44-LM2 loose
-matching (ignore case, whitespace, hyphens, with the `HANGUL JUNGSEONG O-E`
-exception). This is `regex`'s `names.c` and `tables_names.c`, moved. It is in
-its own translation units behind `name.h`, tier 1, and nothing in tier 0
-includes it.
+codepoint), name aliases in all five kinds, named sequences, and the reverse
+lookup with UAX #44-LM2 loose matching. In its own translation units behind
+`name.h`, tier 1, and nothing in tier 0 includes it -
+`make check-layering` reports the file counts of both tiers so that a run says
+what it checked rather than only what it forbade.
+
+**What it costs, measured.** 18,457 distinct words and 162,649 tokens encode
+40,951 names that are 1,044,804 bytes as text: a token is a word number in
+fifteen bits and the separator that precedes it in the sixteenth, which is
+`regex`'s encoding and its round-trip check. 434 KB of table for a third of
+what the strings would cost, and only `regex` links it.
+
+**The loose matching took three attempts and the third one is the rule.** LM2
+says to ignore case, whitespace, underscores and *medial* hyphens, with one
+stated exception, and every word of that matters:
+
+- the exception is U+1180 HANGUL JUNGSEONG O-E, because U+116C is HANGUL
+  JUNGSEONG OE. It has to be checked on the **folded** form, not on the name
+  with its spaces, because a caller may hand over a name that is already
+  folded;
+- "medial" has to be judged on the **original** name, where the spaces are
+  still there. Nineteen names have a hyphen after a space - U+11C88 is MARCHEN
+  LETTER -A - and judging medial-ness after the spaces are gone makes it
+  U+11C8F, MARCHEN LETTER A. **The generator's collision check found that
+  before any test did**, which is what that check is for: it refuses to emit a
+  reverse index in which two names are one key;
+- an underscore counts as whitespace, and a hyphen beside one is not medial
+  either, which is what makes `TIBETAN_MARK_GTER_YIG_MGO_-UM_RNAM_BCAD_MA`
+  resolve;
+- and a *fragment* - an algorithmic name's prefix, or a jamo short name - has
+  no medial hyphens to preserve, so it folds by a different function.
+  "CJK UNIFIED IDEOGRAPH-" ends in a hyphen that is not medial in the fragment
+  and is medial in the name the fragment starts, and one function for both
+  meant the entire CJK reverse lookup never matched.
+
+The gate on all of that is a round trip over every codepoint that has a name -
+140,000 of them, most computed rather than stored - in three spellings each.
 
 ---
 

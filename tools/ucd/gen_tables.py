@@ -585,6 +585,7 @@ class Ucd:
 
         self.decomposition = self.load_decompositions()
         self.case = self.load_case()
+        self.names = self.load_names()
         self.mirroring = self.load_mirroring()
         self.brackets = self.load_brackets()
         self.scx = self.load_script_extensions()
@@ -742,6 +743,99 @@ class Ucd:
                 "turkic_folds": turkic_folds, "full": full,
                 "conditional": conditional, "orbits": orbits}
 
+    def load_names(self):
+        """Every name, alias and named sequence, and the algorithmic families.
+
+        Four sources and one rule:
+
+        - `UnicodeData.txt` field 1, less the `<...>` rows. Those are range
+          endpoints and control characters: the ranges are algorithmic and the
+          controls have no name of their own, only aliases.
+        - `NameAliases.txt`, all five types, with their types kept - a caller
+          asking "what is U+0000 called" wants NULL, and a caller asking what
+          kind of name that is wants to know it is a control alias.
+        - `NamedSequences.txt`, which are names for sequences and so cannot go
+          in the same table as names for codepoints.
+        - `Jamo.txt`, for the Hangul syllable names, which are computed.
+
+        The algorithmic families are read from the `<Label, First>` /
+        `<Label, Last>` pairs rather than written down, so that a new CJK
+        extension block arrives with the next regeneration instead of being
+        noticed later. Surrogates and private use are in the same shape and
+        are deliberately absent: they have no names at all.
+        """
+        names = []
+        seen = {}
+
+        def add(name, codepoint):
+            # A name that resolved to two codepoints would make the reverse
+            # lookup arbitrary, so it is an error rather than last-one-wins.
+            if name in seen:
+                if seen[name] != codepoint:
+                    raise SystemExit("name %r maps to both U+%04X and U+%04X"
+                                     % (name, seen[name], codepoint))
+                return
+            seen[name] = codepoint
+            names.append((name, codepoint))
+
+        primary = {}
+        for fields in read_records(self.path("UnicodeData.txt")):
+            if len(fields) < 2 or not fields[1] or fields[1].startswith("<"):
+                continue
+            cp = int(fields[0], 16)
+            primary[cp] = fields[1]
+            add(fields[1], cp)
+
+        aliases = []
+        for fields in read_records(self.path("NameAliases.txt")):
+            if len(fields) < 3:
+                continue
+            cp = int(fields[0], 16)
+            aliases.append((cp, fields[1], fields[2]))
+            add(fields[1], cp)
+
+        sequences = []
+        for fields in read_records(self.path("NamedSequences.txt")):
+            if len(fields) < 2:
+                continue
+            sequences.append((fields[0],
+                              [int(part, 16) for part in fields[1].split()]))
+
+        jamo = {}
+        for fields in read_records(self.path("Jamo.txt")):
+            if len(fields) < 2:
+                continue
+            jamo[int(fields[0], 16)] = fields[1]
+
+        labels = {
+            "CJK Ideograph": "CJK UNIFIED IDEOGRAPH-",
+            "Tangut Ideograph": "TANGUT IDEOGRAPH-",
+            "Hangul Syllable": "HANGUL SYLLABLE ",
+        }
+        ranges = []
+        first = None
+        for fields in read_records(self.path("UnicodeData.txt")):
+            if len(fields) < 2 or not fields[1].startswith("<"):
+                continue
+            label = fields[1].strip("<>")
+            if label.endswith(", First"):
+                first = (int(fields[0], 16), label[: -len(", First")])
+                continue
+            if not label.endswith(", Last") or first is None:
+                continue
+            start, stem_name = first
+            first = None
+            for stem, prefix in labels.items():
+                if stem_name == stem or stem_name.startswith(stem + " "):
+                    ranges.append((start, int(fields[0], 16), prefix,
+                                   stem == "Hangul Syllable"))
+                    break
+        ranges.sort()
+
+        names.sort(key=lambda pair: pair[0].encode("ascii"))
+        return {"names": names, "primary": primary, "aliases": aliases,
+                "sequences": sequences, "jamo": jamo, "ranges": ranges}
+
     def load_mirroring(self):
         """Bidi_Mirroring_Glyph: what UAX #9's rule L4 substitutes."""
         out = {}
@@ -833,6 +927,7 @@ class Tables:
         self.build_decompositions()
         self.build_case()
         self.build_script_runs()
+        self.build_names()
 
     # -- enums -------------------------------------------------------------
 
@@ -1080,6 +1175,165 @@ class Tables:
             raise SystemExit("a case pool exceeds a uint16 offset")
         self.case_pool = pool
 
+    # -- names (tier 1) ----------------------------------------------------
+
+    def build_names(self):
+        """Word-dictionary encoding of the names, and the reverse index.
+
+        Unicode names are a small vocabulary repeated endlessly - 18,349
+        distinct words across 40,951 names and 1,044,804 bytes of text - so
+        storing the words once and the names as word numbers costs about a
+        third of what storing the strings costs.
+
+        A token is a word number in the low 15 bits and, in bit 15, the
+        separator that *precedes* it: set for "-" and clear for a space. The
+        first token of a name has no separator and the bit is clear. Two
+        separators are enough because no Unicode name contains anything else,
+        which is checked here rather than assumed - a name with an apostrophe
+        would silently lose it.
+
+        The design is regex's, with its round-trip check: the encoding is only
+        useful if it decodes back, and the sort order the lookup relies on is
+        the order of the original strings, so a lossy encoding does not merely
+        lose the name it mangled - it invalidates the search for its
+        neighbours.
+        """
+        data = self.ucd.names
+        vocabulary = {}
+        order = []
+
+        def word_number(word):
+            if word not in vocabulary:
+                vocabulary[word] = len(order)
+                order.append(word)
+            return vocabulary[word]
+
+        tokens = []
+        offsets = []
+        codepoints = []
+        for name, codepoint in data["names"]:
+            for character in name:
+                if not (character.isupper() or character.isdigit()
+                        or character in " -"):
+                    raise SystemExit("name %r has an unexpected character %r"
+                                     % (name, character))
+            offsets.append(len(tokens))
+            hyphen = False
+            for piece in re.split(r"([ -])", name):
+                if piece == " ":
+                    hyphen = False
+                    continue
+                if piece == "-":
+                    hyphen = True
+                    continue
+                # An empty piece is what re.split yields between two adjacent
+                # separators, and nineteen Unicode names have a pair - the UCD
+                # spells U+11A0A "ZANABAZAR SQUARE LETTER -A". Skipping them
+                # would drop one separator of the two.
+                number = word_number(piece)
+                if number >= 0x8000:
+                    raise SystemExit("more than 32767 distinct words in names")
+                tokens.append(number | (0x8000 if hyphen else 0))
+                hyphen = False
+            codepoints.append(codepoint)
+        offsets.append(len(tokens))
+
+        for index, (name, _codepoint) in enumerate(data["names"]):
+            decoded = []
+            for position in range(offsets[index], offsets[index + 1]):
+                token = tokens[position]
+                if position != offsets[index]:
+                    decoded.append("-" if token & 0x8000 else " ")
+                decoded.append(order[token & 0x7FFF])
+            if "".join(decoded) != name:
+                raise SystemExit("name %r encodes to %r"
+                                 % (name, "".join(decoded)))
+
+        self.name_words = order
+        self.name_tokens = tokens
+        self.name_offsets = offsets
+        self.name_codepoints = codepoints
+        self.name_longest = max(len(name) for name, _cp in data["names"])
+
+        # The reverse index: the entries in loose-name order, so that a lookup
+        # is a binary search. Kept as a permutation rather than a second copy
+        # of the names.
+        loose_of = [loose_name(name) for name, _cp in data["names"]]
+        collisions = {}
+        for index, key in enumerate(loose_of):
+            if key in collisions:
+                other = collisions[key]
+                if codepoints[other] != codepoints[index]:
+                    raise SystemExit(
+                        "loose matching makes %r and %r the same name, for "
+                        "U+%04X and U+%04X. UAX #44-LM2 has one exception and "
+                        "it is already applied; a second one needs a decision."
+                        % (data["names"][other][0], data["names"][index][0],
+                           codepoints[other], codepoints[index]))
+            collisions[key] = index
+        self.name_loose_order = sorted(range(len(loose_of)),
+                                       key=lambda index: loose_of[index])
+
+        # The primary names, by codepoint, for the forward lookup.
+        primary = sorted(data["primary"])
+        index_by_name = {name: index for index, (name, _cp)
+                         in enumerate(data["names"])}
+        self.name_primary_cp = primary
+        self.name_primary_index = [index_by_name[data["primary"][cp]]
+                                   for cp in primary]
+
+        # The aliases, by codepoint, with their kinds.
+        kinds = ("correction", "control", "alternate", "figment",
+                 "abbreviation")
+        alias_rows = []
+        for cp, name, kind in data["aliases"]:
+            if kind not in kinds:
+                raise SystemExit(
+                    "NameAliases.txt type %r is not one name.c knows; add it "
+                    "to GUNI_NameAliasKind and to this list together." % kind)
+            alias_rows.append((cp, kinds.index(kind), index_by_name[name]))
+        alias_rows.sort()
+        self.name_aliases = alias_rows
+
+        # The named sequences: names for sequences, so a table of their own.
+        sequence_tokens = []
+        sequence_offsets = []
+        sequence_pool = []
+        sequence_pool_offsets = []
+        sequence_names = sorted(data["sequences"], key=lambda row: loose_name(row[0]))
+        for name, points in sequence_names:
+            sequence_offsets.append(len(sequence_tokens))
+            hyphen = False
+            for piece in re.split(r"([ -])", name):
+                if piece == " ":
+                    hyphen = False
+                    continue
+                if piece == "-":
+                    hyphen = True
+                    continue
+                sequence_tokens.append(word_number(piece)
+                                       | (0x8000 if hyphen else 0))
+                hyphen = False
+            sequence_pool_offsets.append(len(sequence_pool))
+            sequence_pool.extend(points)
+        sequence_offsets.append(len(sequence_tokens))
+        sequence_pool_offsets.append(len(sequence_pool))
+        self.sequence_tokens = sequence_tokens
+        self.sequence_offsets = sequence_offsets
+        self.sequence_pool = sequence_pool
+        self.sequence_pool_offsets = sequence_pool_offsets
+        self.sequence_longest = max((len(points) for _n, points in sequence_names),
+                                    default=0)
+
+        # The algorithmic families, and the jamo short names the Hangul rule
+        # spells syllables with.
+        self.name_ranges = data["ranges"]
+        jamo = data["jamo"]
+        self.jamo_lead = [jamo.get(0x1100 + index, "") for index in range(19)]
+        self.jamo_vowel = [jamo.get(0x1161 + index, "") for index in range(21)]
+        self.jamo_trail = [""] + [jamo.get(0x11A7 + index, "")
+                                  for index in range(1, 28)]
+
     # -- script runs -------------------------------------------------------
 
     def build_script_runs(self):
@@ -1292,6 +1546,41 @@ def build_property_entries(ucd, tables):
         entry.value_names = ["No", "Yes"]
         entries.append(entry)
     return entries
+
+
+def loose_name(name):
+    """UAX #44-LM2: ignore case, whitespace, underscores and **medial** hyphens.
+
+    Three things have to be right at once, and they are measured against two
+    different strings, which is why this is longer than the rule sounds:
+
+    - **"medial" is judged on the original name.** A hyphen with a space or an
+      underscore beside it is not medial. Nineteen names have one - U+11C88 is
+      MARCHEN LETTER -A - and dropping it makes MARCHEN LETTER A, which is
+      U+11C8F. Judging medial-ness after the spaces are gone collapses them.
+    - **the exception is judged on the folded form.** The Standard keeps the
+      hyphen in U+1180 HANGUL JUNGSEONG O-E, because U+116C is HANGUL
+      JUNGSEONG OE - and a caller may hand over a name that is already folded,
+      so the comparison cannot depend on the spaces still being there.
+    - an underscore counts as whitespace, which is what makes
+      `LATIN_CAPITAL_LETTER_A` resolve.
+    """
+    folded = []
+    medial = []
+    for index, character in enumerate(name):
+        if character in " _":
+            continue
+        before = name[index - 1] if index > 0 else ""
+        after = name[index + 1] if index + 1 < len(name) else ""
+        separator = (" ", "_", "-", "")
+        folded.append(character.lower())
+        medial.append(character == "-" and before not in separator
+                      and after not in separator)
+    text = "".join(folded)
+    if text == "hanguljungseongo-e":
+        return text
+    return "".join(character for character, is_medial in zip(folded, medial)
+                   if not is_medial)
 
 
 def loose(text):
@@ -1509,6 +1798,14 @@ extern "C" {
         for form in ("NFD", "NFC", "NFKD", "NFKC"):
             out.write("#define GUNI_NORM_MAX_EXPANSION_%s %d\n"
                       % (form, tables.max_expansion[form]))
+        out.write("\n/**\n * @brief The longest character name, in bytes, "
+                  "without its NUL.\n *\n"
+                  " * Generated from the data: a caller sizes a buffer as\n"
+                  " * GUNI_NAME_MAX_LENGTH + 1 and never asks twice.\n */\n")
+        out.write("#define GUNI_NAME_MAX_LENGTH %d\n" % tables.name_longest)
+        out.write("\n/// @brief The most codepoints a named sequence has.\n")
+        out.write("#define GUNI_SEQUENCE_MAX_LENGTH %d\n" % tables.sequence_longest)
+
         out.write("\n/**\n * @brief Words of bitset in a script-run check.\n *\n"
                   " * One bit per script, plus three for UTS #39 section 5.1's\n"
                   " * augmented scripts - Japanese, Korean and HanBopomofo - which are\n"
@@ -2156,6 +2453,172 @@ def emit_bidi_data(ucd, tables, out_dir):
 
 
 
+def emit_name_data(ucd, tables, out_dir):
+    """The character names: tier 1, in their own directory and header.
+
+    More than half the generated bulk of this library, wanted by one consumer,
+    and behind a header nothing in tier 0 includes - which make-layering
+    enforces (design.md section 3).
+    """
+    with open_out(out_dir, "src/name/tables/name_tables.h") as out:
+        out.write(LICENSE_NOTICE)
+        out.write("\n")
+        out.write(generated_notice(ucd.version,
+                                  "UnicodeData.txt, NameAliases.txt, "
+                                  "NamedSequences.txt and Jamo.txt"))
+        out.write("""
+/**
+ * @file
+ *
+ * The generated name tables. **Tier 1**: internal, and not included by
+ * anything in tier 0.
+ *
+ * A token is a word number in the low 15 bits and, in bit 15, the separator
+ * that precedes it - set for "-" and clear for a space. 18,457 words and
+ * 162,649 tokens encode 40,951 names that are 1,044,804 bytes as text.
+ */
+
+#ifndef GHOTI_IO_GUNI_NAME_TABLES_H
+#define GHOTI_IO_GUNI_NAME_TABLES_H
+
+#include <ghoti.io/unicode/core.h>
+#include <ghoti.io/unicode/macros.h>
+#include <stddef.h>
+#include <stdint.h>
+
+""")
+        out.write("#define GUNI_NAME_WORD_COUNT %d\n" % len(tables.name_words))
+        out.write("#define GUNI_NAME_TOKEN_COUNT %d\n" % len(tables.name_tokens))
+        out.write("#define GUNI_NAME_COUNT %d\n" % (len(tables.name_offsets) - 1))
+        out.write("#define GUNI_NAME_PRIMARY_COUNT %d\n"
+                  % len(tables.name_primary_cp))
+        out.write("#define GUNI_NAME_ALIAS_COUNT %d\n" % len(tables.name_aliases))
+        out.write("#define GUNI_NAME_RANGE_COUNT %d\n" % len(tables.name_ranges))
+        out.write("#define GUNI_SEQUENCE_COUNT %d\n"
+                  % (len(tables.sequence_offsets) - 1))
+        out.write("#define GUNI_SEQUENCE_TOKEN_COUNT %d\n"
+                  % len(tables.sequence_tokens))
+        out.write("#define GUNI_SEQUENCE_POOL_COUNT %d\n"
+                  % len(tables.sequence_pool))
+        out.write("/* The separator bit of a token, and the word-number mask. */\n")
+        out.write("#define GUNI_NAME_HYPHEN 0x8000u\n")
+        out.write("#define GUNI_NAME_WORD_MASK 0x7FFFu\n")
+        out.write("""
+extern const char * const guni_name_words[GUNI_NAME_WORD_COUNT];
+extern const uint16_t guni_name_tokens[GUNI_NAME_TOKEN_COUNT];
+extern const uint32_t guni_name_offsets[GUNI_NAME_COUNT + 1];
+extern const uint32_t guni_name_codepoints[GUNI_NAME_COUNT];
+/** The name entries in loose-name order, for the reverse lookup. */
+extern const uint32_t guni_name_loose_order[GUNI_NAME_COUNT];
+
+/** The codepoints with a name of their own, and which entry it is. */
+extern const uint32_t guni_name_primary_cp[GUNI_NAME_PRIMARY_COUNT];
+extern const uint32_t guni_name_primary_index[GUNI_NAME_PRIMARY_COUNT];
+
+/** The aliases, sorted by codepoint. */
+extern const uint32_t guni_name_alias_cp[GUNI_NAME_ALIAS_COUNT];
+extern const uint8_t guni_name_alias_kind[GUNI_NAME_ALIAS_COUNT];
+extern const uint32_t guni_name_alias_index[GUNI_NAME_ALIAS_COUNT];
+
+/** The families whose names are computed: CJK, Tangut, Hangul syllables. */
+extern const uint32_t guni_name_range_first[GUNI_NAME_RANGE_COUNT];
+extern const uint32_t guni_name_range_last[GUNI_NAME_RANGE_COUNT];
+extern const char * const guni_name_range_prefix[GUNI_NAME_RANGE_COUNT];
+/** 1 for the Hangul rule, which spells jamo rather than hex. */
+extern const uint8_t guni_name_range_hangul[GUNI_NAME_RANGE_COUNT];
+
+/** The jamo short names, by index within their part of a syllable. */
+extern const char * const guni_jamo_lead[19];
+extern const char * const guni_jamo_vowel[21];
+extern const char * const guni_jamo_trail[28];
+
+/** Named sequences, in loose-name order. */
+extern const uint16_t guni_sequence_tokens[GUNI_SEQUENCE_TOKEN_COUNT];
+extern const uint32_t guni_sequence_offsets[GUNI_SEQUENCE_COUNT + 1];
+extern const uint32_t guni_sequence_pool[GUNI_SEQUENCE_POOL_COUNT];
+extern const uint32_t guni_sequence_pool_offsets[GUNI_SEQUENCE_COUNT + 1];
+
+#endif // GHOTI_IO_GUNI_NAME_TABLES_H
+""")
+
+    with open_out(out_dir, "src/name/tables/name_data.c") as out:
+        out.write(LICENSE_NOTICE)
+        out.write("\n")
+        out.write(generated_notice(ucd.version,
+                                  "UnicodeData.txt, NameAliases.txt, "
+                                  "NamedSequences.txt and Jamo.txt"))
+        out.write("\n#include \"name_tables.h\"\n")
+        out.write("\nconst char * const guni_name_words[GUNI_NAME_WORD_COUNT] = {\n")
+        emit_array(out, tables.name_words, 6, c_string)
+        out.write("};\n")
+        out.write("\nconst uint16_t guni_name_tokens[GUNI_NAME_TOKEN_COUNT] = {\n")
+        emit_array(out, tables.name_tokens, 12, lambda v: "0x%04Xu" % v)
+        out.write("};\n")
+        out.write("\nconst uint32_t guni_name_offsets[GUNI_NAME_COUNT + 1] = {\n")
+        emit_array(out, tables.name_offsets, 12)
+        out.write("};\n")
+        out.write("\nconst uint32_t guni_name_codepoints[GUNI_NAME_COUNT] = {\n")
+        emit_array(out, tables.name_codepoints, 8, lambda v: "0x%06Xu" % v)
+        out.write("};\n")
+        out.write("\nconst uint32_t guni_name_loose_order[GUNI_NAME_COUNT] = {\n")
+        emit_array(out, tables.name_loose_order, 12)
+        out.write("};\n")
+        out.write("\nconst uint32_t guni_name_primary_cp[GUNI_NAME_PRIMARY_COUNT] = {\n")
+        emit_array(out, tables.name_primary_cp, 8, lambda v: "0x%06Xu" % v)
+        out.write("};\n")
+        out.write("\nconst uint32_t guni_name_primary_index"
+                  "[GUNI_NAME_PRIMARY_COUNT] = {\n")
+        emit_array(out, tables.name_primary_index, 12)
+        out.write("};\n")
+        out.write("\nconst uint32_t guni_name_alias_cp[GUNI_NAME_ALIAS_COUNT] = {\n")
+        emit_array(out, [row[0] for row in tables.name_aliases], 8,
+                   lambda v: "0x%06Xu" % v)
+        out.write("};\n")
+        out.write("\nconst uint8_t guni_name_alias_kind[GUNI_NAME_ALIAS_COUNT] = {\n")
+        emit_array(out, [row[1] for row in tables.name_aliases], 20)
+        out.write("};\n")
+        out.write("\nconst uint32_t guni_name_alias_index"
+                  "[GUNI_NAME_ALIAS_COUNT] = {\n")
+        emit_array(out, [row[2] for row in tables.name_aliases], 12)
+        out.write("};\n")
+        out.write("\nconst uint32_t guni_name_range_first[GUNI_NAME_RANGE_COUNT] = {\n")
+        emit_array(out, [row[0] for row in tables.name_ranges], 8,
+                   lambda v: "0x%06Xu" % v)
+        out.write("};\n")
+        out.write("\nconst uint32_t guni_name_range_last[GUNI_NAME_RANGE_COUNT] = {\n")
+        emit_array(out, [row[1] for row in tables.name_ranges], 8,
+                   lambda v: "0x%06Xu" % v)
+        out.write("};\n")
+        out.write("\nconst char * const guni_name_range_prefix"
+                  "[GUNI_NAME_RANGE_COUNT] = {\n")
+        emit_array(out, [row[2] for row in tables.name_ranges], 3, c_string)
+        out.write("};\n")
+        out.write("\nconst uint8_t guni_name_range_hangul[GUNI_NAME_RANGE_COUNT] = {\n")
+        emit_array(out, [1 if row[3] else 0 for row in tables.name_ranges], 20)
+        out.write("};\n")
+        for name, values in (("lead", tables.jamo_lead),
+                             ("vowel", tables.jamo_vowel),
+                             ("trail", tables.jamo_trail)):
+            out.write("\nconst char * const guni_jamo_%s[%d] = {\n"
+                      % (name, len(values)))
+            emit_array(out, values, 8, c_string)
+            out.write("};\n")
+        out.write("\nconst uint16_t guni_sequence_tokens"
+                  "[GUNI_SEQUENCE_TOKEN_COUNT] = {\n")
+        emit_array(out, tables.sequence_tokens, 12, lambda v: "0x%04Xu" % v)
+        out.write("};\n")
+        out.write("\nconst uint32_t guni_sequence_offsets[GUNI_SEQUENCE_COUNT + 1] = {\n")
+        emit_array(out, tables.sequence_offsets, 12)
+        out.write("};\n")
+        out.write("\nconst uint32_t guni_sequence_pool[GUNI_SEQUENCE_POOL_COUNT] = {\n")
+        emit_array(out, tables.sequence_pool, 8, lambda v: "0x%06Xu" % v)
+        out.write("};\n")
+        out.write("\nconst uint32_t guni_sequence_pool_offsets"
+                  "[GUNI_SEQUENCE_COUNT + 1] = {\n")
+        emit_array(out, tables.sequence_pool_offsets, 12)
+        out.write("};\n")
+
+
 def emit_names_data(ucd, tables, entries, out_dir):
     prop_numbering = tables.numbering["GUNI_Property"]
     with open_out(out_dir, "src/char/tables/names_data.c") as out:
@@ -2251,6 +2714,7 @@ def main(argv):
     emit_case_data(ucd, tables, args.out)
     emit_script_data(ucd, tables, args.out)
     emit_bidi_data(ucd, tables, args.out)
+    emit_name_data(ucd, tables, args.out)
     emit_names_data(ucd, tables, entries, args.out)
 
     sys.stderr.write(

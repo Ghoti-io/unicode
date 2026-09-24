@@ -932,6 +932,12 @@ TIER0_FILES := include/ghoti.io/unicode/core.h include/ghoti.io/unicode/utf.h \
 TIER0_FORBIDDEN := unicode/name\.h
 LAYERING_EXEMPT :=
 
+# Tier 1 is the names, and it may include tier 0 - the split is about size, not
+# dependencies. Listed so that check-layering reports what it checked rather
+# than only what it forbade.
+TIER1_FILES := include/ghoti.io/unicode/name.h src/name/*.c src/name/*.h \
+	src/name/tables/*.c src/name/tables/*.h
+
 # One rule, applied to each tier in turn. Spelled as a macro rather than a
 # loop over a packed string: the forbidden pattern is an alternation and so
 # contains "|" itself, which a loop that splits on "|" silently cuts in half -
@@ -955,7 +961,9 @@ endef
 
 check-layering: ## Fail if a lower tier includes a higher tier's header
 	$(call layering-check,0,$(TIER0_FORBIDDEN),$(TIER0_FILES))
-	@printf "\033[0;32mNo tier includes a higher tier's header.\033[0m\n"
+	@tier1=$$(ls $(TIER1_FILES) 2>/dev/null | wc -l); \
+	tier0=$$(ls $(TIER0_FILES) 2>/dev/null | wc -l); \
+	printf "\033[0;32mNo tier includes a higher tier's header (%s files in tier 0, %s in tier 1).\033[0m\n" "$$tier0" "$$tier1"
 
 
 check-symbols: ## Fail if any exported symbol lacks the version namespace
@@ -1375,8 +1383,9 @@ $(eval $(call fuzz-rule,fuzz_norm,norm))
 $(eval $(call fuzz-rule,fuzz_bidi,bidi))
 $(eval $(call fuzz-rule,fuzz_break,break))
 $(eval $(call fuzz-rule,fuzz_case,case))
+$(eval $(call fuzz-rule,fuzz_name,name))
 
-FUZZ_NAMES := utf norm bidi break case
+FUZZ_NAMES := utf norm bidi break case name
 
 fuzz: ## Build and run every fuzzer for $(FUZZ_TIME) seconds each
 fuzz: $(addprefix fuzz-run-,$(FUZZ_NAMES))
