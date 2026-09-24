@@ -1148,9 +1148,27 @@ passes `make test`. What the three of them came to:
 | Tests | 50 | 99 | 148 in 15 binaries |
 | Fuzz harnesses | 1 | 3 | 6 |
 
-And the whole of it: 11,571 lines of code, 65,689 lines of generated tables,
-99.0% line coverage, clean under Valgrind and ASan from an empty build
-directory, serially and under `-j8`.
+And the whole of it, at the end of C: 13,102 lines of code and 64,170 lines
+of generated tables, 99.0% line coverage, clean under Valgrind and ASan from
+an empty build directory, serially and under `-j8`. Today, with the oracles
+and CSS `line-break` on top, it is 13,591 lines of code, 150 tests in the same
+15 binaries, and the same 64,170 lines of tables - those have not moved since
+C and are byte-identical to it.
+
+Both code figures are `make cloc` over `src include tests Makefile`, summing
+C, C++, headers and the makefile, less the generated tables measured the same
+way:
+
+```
+cloc src include tests Makefile
+cloc $(find src include -path '*/tables/*' -type f)
+```
+
+The first revision of this paragraph said 11,571 and 65,689. The method was
+the same subtraction but the tables were overstated by 1,519 lines, so the
+code figure was under by exactly as much. Neither number reproduced, which is
+the only reason it was caught: a figure whose instrument is not written beside
+it cannot be checked, so the commands are here now.
 
 **What is deliberately not done**, from the phase rows below: the comparison of
 the sweep sums against `regex`'s own `property.c`, and the pairwise Line_Break
