@@ -86,7 +86,24 @@ KINDS = [
 # three named ones are this library's reason to exist (design.md section 2, M2)
 # and ICU spells them as locale keywords, so this is the only place the two
 # libraries' tailoring axes can be checked against each other at all.
-TAILORINGS = ["default", "strict", "normal", "loose"]
+# The three CSS values, named explicitly. **"default" is deliberately not here.**
+# On this library's side it means the zero value, which is `strict`; on ICU's it
+# means "whatever this locale's default is", which under `ja` is not strict. The
+# two were the same question only while the locale was root, and comparing them
+# with a language set reported 35 differences that were a disagreement about what
+# "default" means rather than about any rule.
+TAILORINGS = ["strict", "normal", "loose"]
+
+# The writing system, which CSS Text's four conditional tailorings need and which
+# ICU takes as a language. Asking root for a language-conditional rule and
+# reporting that ICU lacks it would be asking the wrong question, so the driver
+# maps neutral to root, chinese to `zh` and japanese to `ja`.
+SYSTEMS = ["neutral", "chinese", "japanese"]
+
+# `anywhere` is deliberately absent from TAILORINGS: ICU has no `@lb=anywhere`,
+# so there is nothing to compare against. It is gated by the unit tests instead,
+# where its definition - the grapheme cluster boundaries, less the start of text
+# - is checkable without an oracle.
 
 # CSS Text's `line-break: loose` is LB1's `CJ`-to-`ID` resolution *plus*
 # tailorings of its own. ICU implements those; this library implements LB1
@@ -149,6 +166,60 @@ CSS_LOOSE_INSEPARABLE_PAIR = ("Inseparable", "Inseparable")
 #                        CM.
 DICTIONARY_LINE_BREAK = "Complex_Context"
 DICTIONARY_SCRIPTS = {"Han", "Hiragana", "Katakana"}
+
+# ICU implements the *older* CSS Text definition of `line-break: normal`, under
+# which a break before class CJ was allowed. The current specification forbids it
+# for normal and strict alike, and says so in its own change log: "Disallowed
+# breaks before small kana in line-break: normal" (CSSWG issue 10363, changed
+# after the September 2024 Candidate Recommendation Draft). So this library
+# forbids it and ICU 78.3 allows it, and the disagreement is a dated
+# specification change rather than a defect in either.
+#
+# This library used to allow it too, which is how the differential found it: the
+# correction made a previously-agreeing pair disagree.
+CSS_NORMAL_SMALL_KANA = "Conditional_Japanese_Starter"
+
+# The hyphen rule is conditioned on the *preceding character's class* being ID,
+# not on the writing system - so this library applies it in neutral text. ICU
+# applies it only when a language is set: under `ja` the two agree exactly, and
+# in root ICU declines. Measured both ways, which is what distinguishes "ICU
+# gates this on language" from "ICU does not implement this".
+CSS_LOOSE_HYPHENS = {0x2010, 0x2013}
+
+# And ICU applies that rule to **all eleven** codepoints of class HH - U+058A,
+# U+05BE, U+1400, U+2010, U+2012, U+2013, U+2E17, U+2E40, U+2E5D, U+10D6E,
+# U+10EAD - where CSS names two. Broader than the specification's minimum, which
+# the specification explicitly permits: "the precise set of rules in effect for
+# each of loose, normal, and strict is up to the UA", and "UAs can add additional
+# distinctions between strict/normal/loose modes". So neither side is wrong and
+# this library implements the required set.
+CSS_HYPHEN_CLASS = "Unambiguous_Hyphen"
+
+# **What the prefix and suffix tailorings lift is the one thing CSS does not
+# say**, and the two libraries chose differently. This library lifts LB23a and
+# LB25 - the rules that keep a prefix or suffix with its number or ideograph,
+# which is the pairing the tailorings are about - and nothing else. ICU also
+# lifts LB24, which is about letters: it breaks `PR x AL` and `AL x PO` where
+# this library does not.
+#
+# Neither is wrong. The specification says outright that "the precise set of
+# rules in effect for each of loose, normal, and strict is up to the UA", and
+# taking "breaks after prefixes are allowed" at its word would break a currency
+# sign from its digits, which is what scoping it to LB23a and LB25 avoids.
+#
+# Measured, after the scoping: of eight probe pairs around a wide prefix and a
+# wide suffix, seven agree with ICU and this is the one that does not.
+CSS_PREFIX_CLASS = "Prefix_Numeric"
+CSS_SUFFIX_CLASS = "Postfix_Numeric"
+CSS_LETTER_CLASSES = {"Alphabetic", "Hebrew_Letter"}
+
+# The classes CSS's prefix and suffix rules *do* cover: LB23a's ideographs,
+# LB25's numbers and LB27's Korean syllable blocks. A missing break beside one of
+# these is this library's defect, not ICU being broad, so the broad explanation
+# below must refuse them.
+CSS_PAIRED_CLASSES = {"Ideographic", "E_Base", "E_Modifier", "Numeric",
+                      "JL", "JV", "JT", "H2", "H3"}
+CSS_WIDE_WIDTHS = {"Ambiguous", "Fullwidth", "Wide"}
 
 
 def dump_property(binary, name):
@@ -219,13 +290,15 @@ def generate(sweep, cases, seed, per_class, min_len, max_len):
         flat = [cp for picks in pool_by_class.values() for cp in picks]
         pools[kind] = (pool_by_class, flat)
         tailorings = TAILORINGS if kind == "line" else ["default"]
+        systems = SYSTEMS if kind == "line" else ["neutral"]
         for _ in range(cases):
             length = rng.randint(min_len, max_len)
             text = "".join(chr(flat[rng.randrange(len(flat))])
                            for _ in range(length))
             hexed = binascii.hexlify(text.encode("utf-8")).decode().upper()
             for tailoring in tailorings:
-                requests.append((kind, hexed, tailoring))
+                for system in systems:
+                    requests.append((kind, hexed, tailoring, system))
     return requests, pools
 
 
@@ -265,7 +338,9 @@ def pairwise_requests(sweep, prop, kind, tailorings, rng, per_class):
                     hexed = binascii.hexlify(
                         text.encode("utf-8")).decode().upper()
                     for tailoring in tailorings:
-                        requests.append((kind, hexed, tailoring))
+                        for system in (SYSTEMS if kind == "line"
+                                       else ["neutral"]):
+                            requests.append((kind, hexed, tailoring, system))
     return requests, representatives
 
 
@@ -317,15 +392,17 @@ def exhaustive_chunks(kinds, chunk, upto=MAX_CODEPOINT):
                     frame(cp).encode("utf-8")).decode().upper()
                 for kind in kinds:
                     tailorings = TAILORINGS if kind == "line" else ["default"]
+                    systems = SYSTEMS if kind == "line" else ["neutral"]
                     for tailoring in tailorings:
-                        requests.append((kind, hexed, tailoring))
+                        for system in systems:
+                            requests.append((kind, hexed, tailoring, system))
         if requests:
             yield base, requests
 
 
 def ask(argv, requests, who, environment=None):
     """Send every request to one side, and read back one framed answer each."""
-    body = "".join("%s\t%s\t%s\n" % request for request in requests)
+    body = "".join("%s\t%s\t%s\t%s\n" % request for request in requests)
     child = subprocess.Popen(argv, stdin=subprocess.PIPE,
         stdout=subprocess.PIPE, text=True, env=environment)
     out, _ = child.communicate(body)
@@ -397,7 +474,8 @@ def characters_at(text, offsets):
     return out
 
 
-def explain(kind, tailoring, text, ours, theirs, script, line_break):
+def explain(kind, tailoring, system, text, ours, theirs, script, line_break,
+        east_asian_width):
     """Why the two sides differ here, or None if nothing accounts for it.
 
     Every difference is reduced to the set of offsets the two sides disagree
@@ -413,6 +491,76 @@ def explain(kind, tailoring, text, ours, theirs, script, line_break):
         theirs_only = offset_text in yours
         before, after = characters_at(text, [offset])[0]
 
+        # ICU allows a break before class CJ under `normal`; the current CSS
+        # forbids it. Only under `normal` - strict resolves CJ to NS on both
+        # sides and loose resolves it to ID on both - and at a boundary with a CJ
+        # character on **either** side, because what differs is the class the two
+        # libraries resolved it to, and that changes the pair whichever side it
+        # sits on. The first version of this checked only the right-hand
+        # character and left `CJ x PO` unexplained, which is the same difference
+        # seen from the other end.
+        # The two sides are not symmetric, and the guard suite is what forced
+        # that out. With CJ on the **right** this library resolves it to NS and
+        # LB21 forbids a break before NS, so it can never be the side with the
+        # extra boundary: ours-only there would be a defect. With CJ on the
+        # **left** the resolution changes the left-hand class and the direction
+        # then depends on the other character - `NS x PO` breaks where `ID x PO`
+        # does not - so both directions are legitimate.
+        if (kind == "line" and tailoring == "normal" and theirs_only
+                and after is not None
+                and line_break(ord(after)) == CSS_NORMAL_SMALL_KANA):
+            reasons.add("ICU implements the pre-2024 CSS normal, which resolved"
+                        " small kana to ID")
+            continue
+        if (kind == "line" and tailoring == "normal" and before is not None
+                and line_break(ord(before)) == CSS_NORMAL_SMALL_KANA):
+            reasons.add("ICU implements the pre-2024 CSS normal, which resolved"
+                        " small kana to ID")
+            continue
+
+        # ICU's hyphen rule covers all of class HH; CSS names two codepoints.
+        # Scoped tightly: loose, ICU's extra boundary, a language set (ICU gates
+        # it on one), and an HH character CSS does *not* name - so a difference at
+        # U+2010 or U+2013 is never filed here.
+        # ICU's hyphen rule covers all of class HH; CSS names two codepoints.
+        # **Either side of the character**, because ICU's treatment shows on both:
+        # having broken before an HH character it keeps it attached to what
+        # follows, so the same divergence appears as an ICU-only boundary before
+        # it and an ours-only boundary after it. The first version checked only
+        # the boundary before, and a random string containing `ID HH AI` was left
+        # unexplained on its second offset.
+        #
+        # Scoped to loose, a language being set, and an HH character CSS does not
+        # name - nine codepoints - so a difference at U+2010 or U+2013 is never
+        # filed here.
+        if (kind == "line" and tailoring == "loose" and system != "neutral"
+                and ((theirs_only and after is not None
+                          and line_break(ord(after)) == CSS_HYPHEN_CLASS
+                          and ord(after) not in CSS_LOOSE_HYPHENS)
+                     or (not theirs_only and before is not None
+                          and line_break(ord(before)) == CSS_HYPHEN_CLASS
+                          and ord(before) not in CSS_LOOSE_HYPHENS))):
+            reasons.add("ICU applies the hyphen rule to all of class HH; CSS"
+                        " names U+2010 and U+2013")
+            continue
+
+        # The hyphens after an ID character: ours, and only where ICU has no
+        # language to gate it on. Under zh or ja the two agree, so an unexplained
+        # difference there is a real one.
+        # `line_break()` reads the raw table, and this rule is about the class
+        # *after* LB1 - under loose, class CJ resolves to ID. Reading the raw
+        # class left `U+308E U+2010` unexplained, U+308E being small kana that
+        # becomes Ideographic exactly here.
+        if (kind == "line" and tailoring == "loose" and not theirs_only
+                and system == "neutral"
+                and after is not None and ord(after) in CSS_LOOSE_HYPHENS
+                and before is not None
+                and line_break(ord(before)) in ("Ideographic",
+                        CSS_NORMAL_SMALL_KANA)):
+            reasons.add("ICU gates the hyphen-after-ID rule on language; CSS"
+                        " gates it on the preceding class")
+            continue
+
         if (kind == "line" and tailoring == "loose" and theirs_only
                 and after is not None
                 and ord(after) in CSS_LOOSE_ITERATION_MARKS):
@@ -425,6 +573,45 @@ def explain(kind, tailoring, text, ours, theirs, script, line_break):
                     == CSS_LOOSE_INSEPARABLE_PAIR):
             reasons.add("CSS loose breaks between inseparable characters")
             continue
+
+        # **ICU's prefix and suffix tailorings are broader than CSS's, in both
+        # directions and across classes**, and this is one statement rather than
+        # three because measuring it three ways produced three partial ones. What
+        # CSS asks for is a break *before* a wide PO and *after* a wide PR, and
+        # only where the other character is a number or ideograph - the pairing
+        # LB23a, LB25 and LB27 exist to protect. ICU also breaks before a wide
+        # PR, after a wide PO, and beside letters and symbols: asking every
+        # left-hand class against a wide PR and a wide PO gave 41 classes and 36
+        # where CSS's reading gives far fewer.
+        #
+        # Permitted: "the precise set of rules in effect for each of loose,
+        # normal, and strict is up to the UA."
+        #
+        # Scope and its cost, stated because this is the broadest explanation
+        # here: loose only, Chinese or Japanese only, ICU's extra boundary only,
+        # and immediately beside one of the nineteen wide PR or PO codepoints. It
+        # would absorb a defect in which *this library failed* to break beside one
+        # of those nineteen under loose in zh/ja, so the rules CSS does require
+        # there are asserted case by case in test_segment.cpp rather than left to
+        # this differential.
+        if (kind == "line" and tailoring == "loose" and theirs_only
+                and system != "neutral"):
+            pair = (before, after)
+            wide_fix = [n for n, ch in enumerate(pair) if ch is not None
+                        and line_break(ord(ch)) in (CSS_PREFIX_CLASS,
+                                                    CSS_SUFFIX_CLASS)
+                        and east_asian_width(ord(ch)) in CSS_WIDE_WIDTHS]
+            # ...and the character on the other side is NOT one CSS's own rule
+            # pairs with. If it is, CSS requires the break and a missing one is a
+            # defect here. The guard suite caught this: the broad form absorbed
+            # `Hangul x wide PO`, which LB27 makes this library's business.
+            others = [pair[1 - n] for n in wide_fix]
+            if wide_fix and not any(ch is not None
+                    and line_break(ord(ch)) in CSS_PAIRED_CLASSES
+                    for ch in others):
+                reasons.add("ICU's prefix and suffix tailorings are broader than"
+                            " CSS's, which are about numbers and ideographs")
+                continue
 
         if kind == "word":
             complex_context = [ch for ch in (before, after) if ch is not None
@@ -456,35 +643,91 @@ def explain(kind, tailoring, text, ours, theirs, script, line_break):
 #
 # Each case is (label, kind, tailoring, text, ours, theirs, expect_explained).
 def self_test_cases():
+    """(label, kind, tailoring, system, text, ours, theirs, expect_explained)."""
     han, mark, ell1, ell2, thai = 0x4E00, 0x30FD, 0x2026, 0x22EF, 0x0E01
+    kana, hyphen = 0x3041, 0x2010
     marks = chr(han) + chr(mark) + chr(han)
     inseparable = chr(ell1) + chr(ell2)
+    small_kana = chr(han) + chr(kana) + chr(han)
+    hyphenated = chr(han) + chr(hyphen) + chr(han)
     doubled_han = chr(han) * 2
     doubled_thai = chr(thai) * 2
     return [
         ("ICU breaks before an iteration mark, in loose",
-         "line", "loose", marks, "6 9", "3 6 9", True),
+         "line", "loose", "neutral", marks, "6 9", "3 6 9", True),
         ("ICU breaks between two Inseparables, in loose",
-         "line", "loose", inseparable, "6", "3 6", True),
+         "line", "loose", "neutral", inseparable, "6", "3 6", True),
+        ("ICU breaks before small kana in normal, as pre-2024 CSS did",
+         "line", "normal", "neutral", small_kana, "6 9", "3 6 9", True),
+        ("we break before a hyphen after ID and ICU has no language to gate on",
+         "line", "loose", "neutral", hyphenated, "3 6 9", "6 9", True),
         ("ICU splits a Han run in word breaking",
-         "word", "default", doubled_han, "0 3 6", "0 6", True),
+         "word", "default", "neutral", doubled_han, "0 3 6", "0 6", True),
         ("ICU resolves a Complex_Context run with a dictionary",
-         "word", "default", doubled_thai, "0 3 6", "0 6", True),
+         "word", "default", "neutral", doubled_thai, "0 3 6", "0 6", True),
         # Everything below is a defect wearing a known divergence's clothes.
         ("we break before an iteration mark and ICU does not",
-         "line", "loose", marks, "3 6 9", "6 9", False),
+         "line", "loose", "neutral", marks, "3 6 9", "6 9", False),
         ("ICU breaks before an iteration mark in strict, not loose",
-         "line", "strict", marks, "6 9", "3 6 9", False),
+         "line", "strict", "neutral", marks, "6 9", "3 6 9", False),
         ("we break between two Inseparables and ICU does not",
-         "line", "loose", inseparable, "3 6", "6", False),
+         "line", "loose", "neutral", inseparable, "3 6", "6", False),
         ("ICU breaks between two Inseparables in normal, not loose",
-         "line", "normal", inseparable, "6", "3 6", False),
+         "line", "normal", "neutral", inseparable, "6", "3 6", False),
+        ("ICU breaks before small kana in STRICT, which no CSS ever allowed",
+         "line", "strict", "neutral", small_kana, "6 9", "3 6 9", False),
+        ("we break before small kana in normal, the wrong direction",
+         "line", "normal", "neutral", small_kana, "3 6 9", "6 9", False),
+        ("the hyphen rule, but under ja where ICU agrees - so a real difference",
+         "line", "loose", "japanese", hyphenated, "3 6 9", "6 9", False),
+        ("the hyphen rule in the wrong direction",
+         "line", "loose", "neutral", hyphenated, "6 9", "3 6 9", False),
         ("a line-break difference beside a Han character",
-         "line", "default", marks, "6 9", "3 6 9", False),
+         "line", "default", "neutral", marks, "6 9", "3 6 9", False),
         ("a grapheme difference beside a Han character",
-         "grapheme", "default", doubled_han, "0 3 6", "0 6", False),
+         "grapheme", "default", "neutral", doubled_han, "0 3 6", "0 6", False),
         ("a known divergence and a defect in the same case",
-         "line", "loose", marks, "6 9", "3 5 6 9", False),
+         "line", "loose", "neutral", marks, "6 9", "3 5 6 9", False),
+    ] + [
+        # The small-kana divergence with CJ on the left rather than the right,
+        # which the first explainer could not see.
+        ("CJ on the left, in normal",
+         "line", "normal", "neutral", chr(kana) + chr(0x0025), "3 4", "4", True),
+        ("CJ on the left, but in strict where both resolve NS",
+         "line", "strict", "neutral", chr(kana) + chr(0x0025), "3 4", "4", False),
+        # ICU's broader hyphen class: U+058A is HH and CSS does not name it.
+        ("ICU breaks before U+058A, an HH character CSS does not name",
+         "line", "loose", "japanese", chr(han) + chr(0x058A), "5", "3 5", True),
+        ("we break after U+05BE, the same divergence from the other side",
+         "line", "loose", "japanese", chr(0x05BE) + chr(0x0041), "2 3", "3", True),
+        ("we break after U+2010, which CSS names - so not this rule",
+         "line", "loose", "japanese", chr(0x2010) + chr(0x0041), "3 4", "4", False),
+        ("we break after U+05BE in neutral, where ICU's rule does not apply",
+         "line", "loose", "neutral", chr(0x05BE) + chr(0x0041), "2 3", "3", False),
+        ("the same in neutral, where ICU has no language to gate on",
+         "line", "loose", "neutral", chr(han) + chr(0x058A), "5", "3 5", False),
+        ("ICU breaks before U+2010, which CSS *does* name, so not this rule",
+         "line", "loose", "japanese", hyphenated, "6 9", "3 6 9", False),
+        # The hyphen rule with CJ on the left, which resolves to ID under loose.
+        ("we break before U+2010 after small kana, which loose makes ID",
+         "line", "loose", "neutral", chr(0x308E) + chr(0x2010), "3 6", "6", True),
+        # ICU's extra break before a wide prefix, and its near-misses.
+        ("ICU breaks before a wide prefix, in Japanese loose",
+         "line", "loose", "japanese", chr(0x0041) + chr(0xFFE5), "4", "1 4", True),
+        ("ICU breaks after a wide prefix beside a letter, in Japanese loose",
+         "line", "loose", "japanese", chr(0xFFE5) + chr(0x0041), "4", "3 4", True),
+        ("ICU lifts LB24 beside a wide suffix, in Japanese loose",
+         "line", "loose", "japanese", chr(0x0041) + chr(0xFF05), "4", "1 4", True),
+        ("the same in neutral, where the tailoring does not apply at all",
+         "line", "loose", "neutral", chr(0x0041) + chr(0xFFE5), "4", "1 4", False),
+        ("the same but ours-only, the wrong direction",
+         "line", "loose", "japanese", chr(0x0041) + chr(0xFFE5), "1 4", "4", False),
+        ("a NARROW prefix, which the width condition excludes",
+         "line", "loose", "japanese", chr(0x0041) + chr(0x0024), "2", "1 2", False),
+
+        ("Hangul before a wide suffix, which LB27 makes ours too - a real"
+         " difference if it reappears",
+         "line", "loose", "japanese", chr(0xAC00) + chr(0xFF05), "6", "3 6", False),
     ]
 
 
@@ -492,9 +735,12 @@ def self_test(sweep):
     """Check every guard on `explain()`. Returns the number that misbehaved."""
     script = property_of(sweep, "Script")
     line_break = property_of(sweep, "Line_Break")
+    east_asian_width = property_of(sweep, "East_Asian_Width")
     wrong = 0
-    for label, kind, tailoring, text, ours, theirs, expected in self_test_cases():
-        reason = explain(kind, tailoring, text, ours, theirs, script, line_break)
+    for (label, kind, tailoring, system, text, ours, theirs,
+            expected) in self_test_cases():
+        reason = explain(kind, tailoring, system, text, ours, theirs, script,
+                         line_break, east_asian_width)
         got = reason is not None
         if got != expected:
             wrong += 1
@@ -507,8 +753,8 @@ def self_test(sweep):
     else:
         print("explainer: %d cases, %d explained and %d refused, as intended"
               % (len(self_test_cases()),
-                 sum(1 for case in self_test_cases() if case[6]),
-                 sum(1 for case in self_test_cases() if not case[6])))
+                 sum(1 for case in self_test_cases() if case[7]),
+                 sum(1 for case in self_test_cases() if not case[7])))
     return wrong
 
 
@@ -520,9 +766,10 @@ class Tally:
     apart. There is one copy, and `add()` is it.
     """
 
-    def __init__(self, script, line_break, keep_examples):
+    def __init__(self, script, line_break, east_asian_width, keep_examples):
         self.script = script
         self.line_break = line_break
+        self.east_asian_width = east_asian_width
         self.keep_examples = keep_examples
         self.counts = {}
         self.examples = {}
@@ -531,16 +778,16 @@ class Tally:
 
     def add(self, requests, mine, theirs):
         for request, ours, yours in zip(requests, mine, theirs):
-            kind, hexed, tailoring = request
-            key = (kind, tailoring)
+            kind, hexed, tailoring, system = request
+            key = (kind, tailoring, system)
             self.requests += 1
             agreed, explained, unexplained = self.counts.get(key, (0, 0, 0))
             if ours == yours:
                 self.counts[key] = (agreed + 1, explained, unexplained)
                 continue
             text = binascii.unhexlify(hexed).decode("utf-8")
-            reason = explain(kind, tailoring, text, ours, yours, self.script,
-                             self.line_break)
+            reason = explain(kind, tailoring, system, text, ours, yours,
+                             self.script, self.line_break, self.east_asian_width)
             if reason is not None:
                 self.counts[key] = (agreed, explained + 1, unexplained)
                 counts = self.explained_by.setdefault(key, {})
@@ -559,8 +806,8 @@ class Tally:
             agreed, explained, unexplained = self.counts[key]
             total_unexplained += unexplained
             total_explained += explained
-            label = key[0] if key[0] != "line" else "%s/%s" % key
-            print("  %-16s %8d agreed %6d explained %6d UNEXPLAINED  %s"
+            label = key[0] if key[0] != "line" else "%s/%s/%s" % key
+            print("  %-30s %7d agreed %6d explained %6d UNEXPLAINED  %s"
                   % (label, agreed, explained, unexplained,
                      "ok" if unexplained == 0 else "DIFFERS"))
             for reason, count in sorted(self.explained_by.get(key, {}).items()):
@@ -662,7 +909,8 @@ def main(argv):
     environment.setdefault("GUNI_TEST_DATA", os.path.join(ROOT, "tests", "data"))
     script = property_of(sweep, "Script")
     line_break = property_of(sweep, "Line_Break", absent="Unknown")
-    tally = Tally(script, line_break, args.show)
+    east_asian_width = property_of(sweep, "East_Asian_Width")
+    tally = Tally(script, line_break, east_asian_width, args.show)
 
     known = [kind for kind, _prop in KINDS]
     if args.kind:

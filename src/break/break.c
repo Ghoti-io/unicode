@@ -115,9 +115,22 @@ GUNI_LineBreak guni_line_break_resolve(GUNI_LineBreak class_,
           ? GUNI_LB_CM
           : GUNI_LB_AL;
     case GUNI_LB_CJ:
-      /* The one place LB1 has a choice, and the reason this function is
-       * public and parameterised. */
-      return (tailoring == GUNI_LINE_BREAK_STRICT) ? GUNI_LB_NS : GUNI_LB_ID;
+      /* The one place LB1 has a choice, and the reason this function is public
+       * and parameterised.
+       *
+       * **`normal` takes `NS`, with `strict`.** This read `!= STRICT` and gave
+       * `normal` the `ID` resolution, which is wrong against CSS Text section
+       * 5.2: breaks before class `CJ` are "forbidden for normal and strict line
+       * breaking and allowed in loose". So the axis LB1 opens is binary and
+       * `loose` is its only taker; what separates `normal` from `strict` is a
+       * different tailoring, and only in Chinese and Japanese.
+       *
+       * ANYWHERE takes `ID` for tidiness. Nothing reads it: that value
+       * disregards the pair rules entirely. */
+      return (tailoring == GUNI_LINE_BREAK_LOOSE
+                 || tailoring == GUNI_LINE_BREAK_ANYWHERE)
+          ? GUNI_LB_ID
+          : GUNI_LB_NS;
     default:
       return class_;
   }
@@ -148,6 +161,7 @@ struct GUNI_BreakText {
   const uint32_t * codepoints;
   size_t length;
   GUNI_LineBreakTailoring tailoring;
+  GUNI_WritingSystem writing_system;
   const GUNI_BreakProvider * provider;
 };
 
@@ -739,6 +753,38 @@ typedef struct {
   int present;        ///< Zero at sot or eot.
 } LbChar;
 
+/**
+ * The classes LB23a, LB25 and LB27 pair a numeric prefix or suffix with - which
+ * is the set the CSS prefix and suffix tailorings unpair.
+ *
+ * `ID`, `EB` and `EM` are LB23a's; `NU` is LB25's; and the five Korean syllable
+ * classes are LB27's, which exists to "treat a Korean Syllable Block the same as
+ * ID". **Forgetting the Korean five was a real omission**, found by the ICU
+ * differential: ICU allowed `JL x PO` under loose Japanese and this did not, and
+ * the rule LB27 states makes ICU right. A Hangul character can appear in
+ * Japanese text, and the tailoring is about the class rather than the script.
+ */
+static int css_ideographic(uint32_t value) {
+  return value == GUNI_LB_ID || value == GUNI_LB_EB || value == GUNI_LB_EM
+      || value == GUNI_LB_NU || value == GUNI_LB_JL || value == GUNI_LB_JV
+      || value == GUNI_LB_JT || value == GUNI_LB_H2 || value == GUNI_LB_H3;
+}
+
+/**
+ * East_Asian_Width in {Ambiguous, Fullwidth, Wide}, which is how CSS Text
+ * qualifies its prefix and suffix tailorings.
+ */
+static int css_wide(uint32_t codepoint) {
+  switch (guni_east_asian_width(codepoint)) {
+    case GUNI_EAW_AMBIGUOUS:
+    case GUNI_EAW_FULLWIDTH:
+    case GUNI_EAW_WIDE:
+      return 1;
+    default:
+      return 0;
+  }
+}
+
 /** The three quotation classes LB19 and LB19a treat alike. */
 static int lb_quote(uint32_t value) {
   return value == GUNI_LB_QU;
@@ -912,6 +958,163 @@ static int lb_even_regional_indicators(const Text * text, size_t at) {
  * is not here - the generator resolved it into the table - and LB2 and LB3
  * are the ends of the subject, which the caller answers.
  */
+/**
+ * CSS Text section 5.2's `line-break` tailorings.
+ *
+ * Returns 1 to allow a break the UAX #14 rules below would forbid, and -1 for
+ * "no opinion, carry on". Nothing here returns 0: every one of these rules
+ * *lifts* a prohibition, and none of them adds one.
+ *
+ * The specification's own order is kept so the two can be read side by side,
+ * and the writing-system condition is spelled out on each rule that carries
+ * one rather than hoisted, because which rules carry it is the thing a reader
+ * checks. Four do; four do not.
+ *
+ * `strict` reaches none of these. `anywhere` never gets here - it is answered
+ * before the pair rules run at all.
+ */
+static int css_tailoring(const Text * text, size_t at, uint32_t a, uint32_t b,
+    LbChar left, LbChar right) {
+  const GUNI_LineBreakTailoring tailoring = text->tailoring;
+  const int loose = (tailoring == GUNI_LINE_BREAK_LOOSE);
+  const int cjk = (text->writing_system == GUNI_WRITING_SYSTEM_CHINESE
+      || text->writing_system == GUNI_WRITING_SYSTEM_JAPANESE);
+  (void)at;
+
+  if (tailoring == GUNI_LINE_BREAK_STRICT) {
+    return -1;
+  }
+  if (!left.present || !right.present) {
+    return -1;
+  }
+
+  /* **A "break before X" tailoring lifts the prohibition X creates, not one the
+   * character before it creates.** Six of these eight rules allow a break
+   * *before* something, and CSS does not say what they override - the same
+   * silence the prefix and suffix rules run into below.
+   *
+   * `BB`, `OP` and `QU` are the three classes that forbid a break *after*
+   * themselves: LB21's `BB x`, LB14's `OP SP* x` and LB19's `QU x`. Nothing
+   * about an iteration mark or a middle dot should let a line begin after an
+   * opening bracket or a quotation mark - the prohibition is the bracket's, and
+   * it is still there. So the tailorings yield to it.
+   *
+   * Measured, not assumed: asking every left-hand class against an iteration
+   * mark and against a centred punctuation mark gave exactly these three
+   * classes as the ones ICU declines, and nothing else. `GL` is a fourth such
+   * class and needs no entry here because LB12 has already returned above. */
+  if (a == GUNI_LB_BB || a == GUNI_LB_OP || a == GUNI_LB_QU) {
+    return -1;
+  }
+
+  /* "allowed for normal and loose ... if the writing system is Chinese or
+   * Japanese": breaks before certain CJK hyphen-like characters. The only
+   * tailoring `normal` has, and therefore the only thing separating CSS
+   * `normal` from CSS `strict`. Both are Line_Break NS, so LB21 is what would
+   * otherwise forbid this. */
+  if (cjk && (right.codepoint == UINT32_C(0x301C)
+                 || right.codepoint == UINT32_C(0x30A0))) {
+    return 1;
+  }
+  if (!loose) {
+    return -1;
+  }
+
+  /* "allowed for loose ... if the preceding character belongs to the Unicode
+   * line breaking class ID": breaks before hyphens U+2010 and U+2013. Both are
+   * HH, which LB21 forbids a break before. Note this condition is on the
+   * neighbour's class and not on the writing system. */
+  if (a == GUNI_LB_ID && (right.codepoint == UINT32_C(0x2010)
+                             || right.codepoint == UINT32_C(0x2013))) {
+    return 1;
+  }
+
+  /* "breaks before Japanese small kana or the Katakana-Hiragana prolonged
+   * sound mark, i.e. characters from the Unicode line breaking class CJ" is
+   * LB1, and guni_line_break_resolve() has already turned CJ into ID for
+   * `loose`, so there is nothing to do here. Named so that a reader comparing
+   * this function against the specification finds all eight rules. */
+
+  /* "breaks before iteration marks". All six are NS; LB21 forbids it. */
+  switch (right.codepoint) {
+    case UINT32_C(0x3005): /* IDEOGRAPHIC ITERATION MARK */
+    case UINT32_C(0x303B): /* VERTICAL IDEOGRAPHIC ITERATION MARK */
+    case UINT32_C(0x309D): /* HIRAGANA ITERATION MARK */
+    case UINT32_C(0x309E): /* HIRAGANA VOICED ITERATION MARK */
+    case UINT32_C(0x30FD): /* KATAKANA ITERATION MARK */
+    case UINT32_C(0x30FE): /* KATAKANA VOICED ITERATION MARK */
+      return 1;
+    default:
+      break;
+  }
+
+  /* "breaks between inseparable characters ... i.e. characters from the
+   * Unicode line breaking class IN". *Between*, so both sides: LB22 forbids a
+   * break before IN from any left-hand class, and this lifts it only for the
+   * pair. */
+  if (a == GUNI_LB_IN && b == GUNI_LB_IN) {
+    return 1;
+  }
+
+  if (!cjk) {
+    return -1;
+  }
+
+  /* "breaks before certain centered punctuation marks". Eight are NS and
+   * U+FF01 and U+FF1F are EX, so this lifts LB21 for some and LB13 for the
+   * other two - which is why this function runs before LB13 and not after. */
+  switch (right.codepoint) {
+    case UINT32_C(0x30FB): /* KATAKANA MIDDLE DOT */
+    case UINT32_C(0xFF1A): /* FULLWIDTH COLON */
+    case UINT32_C(0xFF1B): /* FULLWIDTH SEMICOLON */
+    case UINT32_C(0xFF65): /* HALFWIDTH KATAKANA MIDDLE DOT */
+    case UINT32_C(0x203C): /* DOUBLE EXCLAMATION MARK */
+    case UINT32_C(0x2047): /* DOUBLE QUESTION MARK */
+    case UINT32_C(0x2048): /* QUESTION EXCLAMATION MARK */
+    case UINT32_C(0x2049): /* EXCLAMATION QUESTION MARK */
+    case UINT32_C(0xFF01): /* FULLWIDTH EXCLAMATION MARK */
+    case UINT32_C(0xFF1F): /* FULLWIDTH QUESTION MARK */
+      return 1;
+    default:
+      break;
+  }
+
+  /* "breaks before suffixes: characters with ... class PO and the East Asian
+   * Width property Ambiguous, Fullwidth, or Wide", and "breaks after prefixes"
+   * for PR the same way. Written as class plus width, as the specification
+   * writes them, rather than as the ten and nine codepoints that satisfy them
+   * today - a new currency sign or per-mille sign should be covered without
+   * this file changing.
+   *
+   * **Which prohibitions these two lift is the one thing CSS does not say.**
+   * "Breaks after prefixes ... are allowed" names no rule, and taken at its word
+   * it would break `¤` from the digits after it and a closing bracket from the
+   * `%` before it - output no typesetter wants and no browser produces. The
+   * specification also says outright that "the precise set of rules in effect
+   * for each of loose, normal, and strict is up to the UA", so this is a choice
+   * and not a reading.
+   *
+   * The choice: they lift **LB23a and LB25, and nothing else** - the two rules
+   * that exist precisely to keep a prefix or suffix with the number or ideograph
+   * it belongs to, which is the pairing these tailorings are about. So
+   * `100¥` and `50%` may break in loose Japanese and `(¥` may not.
+   * Everything the *other* character forbids on its own account - a break before
+   * a closing bracket, after an opening one, before an ellipsis, around a
+   * quotation mark - stays forbidden, because those prohibitions have nothing to
+   * do with the prefix.
+   *
+   * ICU lifts more than this, and the differential explains the difference
+   * rather than chasing it: measured class by class, ICU also breaks
+   * `PR x AL`, which is LB24 and is about letters rather than numbers. */
+  if (b == GUNI_LB_PO && css_wide(right.codepoint) && css_ideographic(a)) {
+    return 1;
+  }
+  if (a == GUNI_LB_PR && css_wide(left.codepoint) && css_ideographic(b)) {
+    return 1;
+  }
+  return -1;
+}
+
 static int line_break(const Text * text, size_t at) {
   LbChar left = lb_prev(text, at);
   LbChar right = lb_next(text, at);
@@ -975,6 +1178,19 @@ static int line_break(const Text * text, size_t at) {
   if (b == GUNI_LB_GL && a != GUNI_LB_SP && a != GUNI_LB_BA && a != GUNI_LB_HY && a != GUNI_LB_HH) {
     return 0; // LB12a
   }
+  /* CSS Text section 5.2's tailorings, which lift specific UAX #14
+   * prohibitions. Placed here deliberately: everything above is either a
+   * mandatory break or a structural prohibition CSS does not touch - no break
+   * before a space, inside a CRLF, before a combining mark, around a word
+   * joiner, after a zero-width joiner - and everything below is a preference
+   * that one of these may override. LB13 is the first of those. */
+  {
+    int tailored = css_tailoring(text, at, a, b, left, right);
+    if (tailored >= 0) {
+      return tailored;
+    }
+  }
+
   if (b == GUNI_LB_CL || b == GUNI_LB_CP || b == GUNI_LB_EX || b == GUNI_LB_SY) {
     return 0; // LB13
   }
@@ -1364,6 +1580,29 @@ static bool break_at(const Text * text, GUNI_BreakKind kind, size_t position) {
     case GUNI_BREAK_SENTENCE:
       return sentence_break(text, position, before, after) != 0;
     case GUNI_BREAK_LINE: {
+      /* CSS `anywhere`: a break opportunity around every typographic character
+       * unit, which is the grapheme cluster, disregarding every UAX #14
+       * prohibition. Answered here rather than inside the pair rules because it
+       * is not a tailoring of them - it replaces them.
+       *
+       * The clause "even those introduced by characters with the GL, WJ, or ZWJ
+       * line breaking classes" comes out right without being implemented: a
+       * word joiner and a no-break space each form their own cluster, so a
+       * boundary falls on both sides, and a zero-width joiner ends a cluster
+       * unless it is joining two pictographs. What is deliberately *not*
+       * disregarded is grapheme clustering itself - breaking inside a cluster
+       * would put a combining mark on a line of its own, and CSS says "around
+       * every typographic character unit", not inside one.
+       *
+       * The start of text is still not reported: that is LB2 and it is handled
+       * above, which is the one way this differs from asking for
+       * GUNI_BREAK_GRAPHEME directly. The provider is not consulted, because a
+       * dictionary can only *add* opportunities and every opportunity is
+       * already allowed. */
+      if (text->tailoring == GUNI_LINE_BREAK_ANYWHERE) {
+        return grapheme_break(text, position, before, before_start, after) != 0;
+      }
+
       /* The provider first, and only strictly inside a run of SA characters:
        * a dictionary knows things the rules cannot, and the rules have
        * already lost the SA class to LB1 by the time they run. */
@@ -1393,6 +1632,8 @@ static Text make_text(const GUNI_BreakOptions * options, const char * utf8,
   text.length = ((utf8 == NULL && codepoints == NULL)) ? 0 : length;
   text.tailoring = (options != NULL) ? options->tailoring
                                      : GUNI_LINE_BREAK_STRICT;
+  text.writing_system = (options != NULL) ? options->writing_system
+                                          : GUNI_WRITING_SYSTEM_NEUTRAL;
   text.provider = (options != NULL) ? options->provider : NULL;
   return text;
 }

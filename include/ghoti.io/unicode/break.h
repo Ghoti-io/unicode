@@ -74,37 +74,100 @@ typedef enum {
 } GUNI_BreakKind;
 
 /**
- * @brief How UAX #14's rule LB1 resolves `CJ`.
+ * @brief Which writing system's conventions apply, for the tailorings that
+ * only exist in Chinese and Japanese text.
  *
- * LB1 says `CJ` becomes `NS` **or `ID`, at the implementation's choice**, and
- * that choice is a document's to make: `strict` keeps small kana with the
- * character before them, `normal` and `loose` let a line break there.
+ * Four of CSS Text's `line-break` tailorings apply **only if the writing system
+ * is Chinese or Japanese** (see GUNI_LineBreakTailoring), and no property of a
+ * character can answer that: the same codepoints occur in both, and in Korean
+ * and in mixed text. It is the document's claim about its own content.
+ *
+ * This is **not locale data and not a locale identifier** (design.md section 2,
+ * M6 and M7): there is no table behind it, nothing is loaded, nothing is read
+ * from the environment, and it selects between rules that are written out in
+ * UAX #14 and CSS Text terms. A caller that has a BCP 47 tag maps it here
+ * itself; CSS Text's Appendix F describes how a UA decides, and that decision
+ * is the caller's, not this library's.
+ *
+ * NEUTRAL is zero, so a caller who does not choose gets the behaviour that
+ * makes no claim about the content - and under it CSS `normal` and `strict`
+ * become identical, which is what CSS Text says they are outside Chinese and
+ * Japanese.
+ */
+typedef enum {
+  GUNI_WRITING_SYSTEM_NEUTRAL = 0, ///< No claim. `normal` and `strict` agree.
+  GUNI_WRITING_SYSTEM_CHINESE,     ///< Chinese conventions apply.
+  GUNI_WRITING_SYSTEM_JAPANESE     ///< Japanese conventions apply.
+} GUNI_WritingSystem;
+
+/**
+ * @brief CSS Text's `line-break` values, which are UAX #14 plus a named set of
+ * typographic tailorings.
+ *
+ * **These are the CSS values, not merely LB1's two resolutions.** An earlier
+ * version of this header named them after CSS and implemented only LB1, which
+ * the ICU differential caught (`make check-oracle-icu`); CSS Text section 5.2
+ * requires more, and all of it is implemented here.
+ *
+ * What LB1 contributes is the `CJ` resolution, and **CSS gives `normal` the
+ * same answer as `strict`** - which is the opposite of what this header used to
+ * say. Quoting the specification: breaks before class `CJ` are *"forbidden for
+ * normal and strict line breaking and allowed in loose"*. So the LB1 axis is
+ * binary, `loose` is the only value that takes `ID`, and `normal` differs from
+ * `strict` by one tailoring that applies only to Chinese and Japanese.
+ *
+ * The full set, in the specification's order. "zh/ja" marks the ones that need
+ * GUNI_WritingSystem to be Chinese or Japanese; the rest apply in any text.
+ *
+ * | tailoring | strict | normal | loose |
+ * | --- | --- | --- | --- |
+ * | break before `U+301C`, `U+30A0` (zh/ja) | no | **yes** | **yes** |
+ * | break before `U+2010`, `U+2013` after an `ID` character | no | no | **yes** |
+ * | break before class `CJ` (this is LB1) | no | no | **yes** |
+ * | break before `U+3005 U+303B U+309D U+309E U+30FD U+30FE` | no | no | **yes** |
+ * | break between two class `IN` characters | no | no | **yes** |
+ * | break before centred punctuation (zh/ja) | no | no | **yes** |
+ * | break before class `PO` with East_Asian_Width A/F/W (zh/ja) | no | no | **yes** |
+ * | break after class `PR` with East_Asian_Width A/F/W (zh/ja) | no | no | **yes** |
+ *
+ * The centred punctuation is `U+30FB U+FF1A U+FF1B U+FF65 U+203C U+2047
+ * U+2048 U+2049 U+FF01 U+FF1F`.
+ *
+ * None of these override a *mandatory* rule or a structural prohibition: a
+ * break is still forbidden before a space, inside a CRLF, before a combining
+ * mark, around a word joiner and after a zero-width joiner. They are applied
+ * after LB12a and before LB13, which is where the prohibitions they lift begin.
  *
  * STRICT is zero, and not because it is stricter: it is the Standard's own
  * worked example and `regex`'s existing behaviour, so it is the answer that
  * changes nothing for a caller who does not choose (design.md section 15.7).
  *
- * **These are LB1's resolutions, and they are named after the CSS `line-break`
- * values that select them - they are not the whole of those values.** CSS Text's
- * `line-break` carries typographic tailorings beyond LB1, and `loose` carries
- * two this library does not apply: a break is permitted *before* the six
- * Japanese iteration marks (U+3005, U+303B, U+309D, U+309E, U+30FD, U+30FE),
- * and between two characters of Line_Break class `IN`, where LB22 forbids one
- * unconditionally. Both were found by the ICU differential
- * (`make check-oracle-icu`) against a header that used to say "CSS `loose`"
- * without qualification, and both are measured and complete rather than read
- * off the specification: ICU 78.3 was asked about all 1,114,112 codepoints.
- *
- * A caller that needs CSS `loose` in full needs those two tailorings on top of
- * `GUNI_LINE_BREAK_LOOSE`. Where they would belong if this library grew them is
- * `GUNI_BreakProvider` (design.md section 9), which is the seam locale and
- * typographic preferences arrive through - the LB1 axis is deliberately about
- * the one choice the Standard leaves to the implementation.
+ * CSS's fifth value, `auto`, is deliberately absent: the specification defines
+ * it as whatever the UA decides, varying with line length, so it is a policy
+ * and not a rule set. A caller that wants it chooses among these per line.
  */
 typedef enum {
-  GUNI_LINE_BREAK_STRICT = 0, ///< `CJ` resolves to `NS`. CSS `strict` selects it.
-  GUNI_LINE_BREAK_NORMAL,     ///< `CJ` resolves to `ID`. CSS `normal` selects it.
-  GUNI_LINE_BREAK_LOOSE       ///< `CJ` resolves to `ID`. CSS `loose` selects it.
+  GUNI_LINE_BREAK_STRICT = 0, ///< CSS `strict`. `CJ` resolves to `NS`.
+  GUNI_LINE_BREAK_NORMAL,     ///< CSS `normal`. `CJ` resolves to `NS`.
+  GUNI_LINE_BREAK_LOOSE,      ///< CSS `loose`. `CJ` resolves to `ID`.
+  /**
+   * @brief CSS `anywhere`: a break opportunity around every typographic
+   * character unit, disregarding every prohibition.
+   *
+   * Implemented as the grapheme cluster boundaries, which is what CSS's
+   * "typographic character unit" is, and which is exactly why the clause
+   * *"even those introduced by characters with the GL, WJ, or ZWJ line breaking
+   * classes"* comes out right: a word joiner and a no-break space each form
+   * their own cluster, so a boundary falls on both sides of them, and a
+   * zero-width joiner ends a cluster unless it is joining two pictographs.
+   * Mandatory breaks are unaffected - they are not prohibitions - and a CRLF
+   * stays one unit because GB3 keeps it together.
+   *
+   * As with every other line-break answer, the start of text is not reported
+   * (UAX #14 LB2), which is where this differs from asking for
+   * GUNI_BREAK_GRAPHEME directly.
+   */
+  GUNI_LINE_BREAK_ANYWHERE
 } GUNI_LineBreakTailoring;
 
 /**
@@ -168,13 +231,20 @@ typedef struct GUNI_BreakProvider {
  * @brief What to ask, and how.
  *
  * A zeroed struct asks for grapheme boundaries with the strict line-break
- * tailoring and no provider, which is the answer to "I did not think about
- * it" that changes nothing.
+ * tailoring, a neutral writing system and no provider, which is the answer to
+ * "I did not think about it" that changes nothing.
  */
 typedef struct {
   GUNI_BreakKind kind;                  ///< Which boundary.
   GUNI_LineBreakTailoring tailoring;    ///< For GUNI_BREAK_LINE only.
   const GUNI_BreakProvider * provider;  ///< For `SA` runs. May be NULL.
+  /**
+   * @brief For GUNI_BREAK_LINE only: whose typographic conventions apply.
+   *
+   * Zero is GUNI_WRITING_SYSTEM_NEUTRAL, under which the four Chinese and
+   * Japanese tailorings do not apply and CSS `normal` and `strict` agree.
+   */
+  GUNI_WritingSystem writing_system;
 } GUNI_BreakOptions;
 
 /**

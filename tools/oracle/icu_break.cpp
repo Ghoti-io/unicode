@@ -32,7 +32,7 @@
  *
  * Protocol, identical to testSegment's GUNI_BREAK_DUMP=stdin:
  *
- *     request   <kind>\t<hex of the UTF-8 bytes>[\t<tailoring>]
+ *     request   <kind>\t<hex of the UTF-8 bytes>[\t<tailoring>[\t<system>]]
  *     answer    <kind>\t<hex>\t<space-separated byte offsets>
  *
  * The answer echoes the request because that is the framing: one answer per
@@ -102,11 +102,29 @@ UBreakIteratorType type_for(const std::string & name, bool * ok) {
  * them ICU's *unqualified* root locale corresponds to is a measured question
  * and not one to assume: the differential asks all three.
  */
-std::string locale_for(UBreakIteratorType type, const std::string & tailoring) {
-  if (type != UBRK_LINE || tailoring == "default") {
+std::string locale_for(UBreakIteratorType type, const std::string & tailoring,
+    const std::string & system) {
+  if (type != UBRK_LINE) {
     return std::string("");
   }
-  return std::string("@lb=") + tailoring;
+  /* **The writing system has to reach ICU as a language, because that is the
+   * only way ICU takes it.** Four of CSS Text's tailorings apply only to Chinese
+   * and Japanese text, and this library takes that as a three-valued field while
+   * ICU takes it as a locale. Asking root for them and reporting that ICU lacks
+   * them would be asking the wrong question: root has no language, so it cannot
+   * apply a language-conditional rule even if it implements one. */
+  std::string locale;
+  if (system == "chinese") {
+    locale = "zh";
+  }
+  else if (system == "japanese") {
+    locale = "ja";
+  }
+  if (tailoring != "default") {
+    locale += "@lb=";
+    locale += tailoring;
+  }
+  return locale;
 }
 
 bool decode_hex(const std::string & hex, std::string * out) {
@@ -163,7 +181,7 @@ std::vector<size_t> utf8_offsets(const UChar * utf16, int32_t length) {
 }
 
 int answer(const std::string & kind, const std::string & hex,
-    const std::string & tailoring) {
+    const std::string & tailoring, const std::string & system) {
   bool known = false;
   const UBreakIteratorType type = type_for(kind, &known);
   if (!known) {
@@ -190,7 +208,7 @@ int answer(const std::string & kind, const std::string & hex,
     return 0;
   }
 
-  const std::string locale = locale_for(type, tailoring);
+  const std::string locale = locale_for(type, tailoring, system);
   status = U_ZERO_ERROR;
   UBreakIterator * iter = ubrk_open(type, locale.c_str(), utf16.data(),
       utf16_length, &status);
@@ -238,14 +256,22 @@ int main(int argc, char ** argv) {
       return 2;
     }
     const size_t second = line.find('\t', first + 1);
+    const size_t third = (second == std::string::npos)
+        ? std::string::npos
+        : line.find('\t', second + 1);
     const std::string kind = line.substr(0, first);
     const std::string hex = (second == std::string::npos)
         ? line.substr(first + 1)
         : line.substr(first + 1, second - first - 1);
     const std::string tailoring = (second == std::string::npos)
         ? std::string("default")
-        : line.substr(second + 1);
-    const int result = answer(kind, hex, tailoring);
+        : line.substr(second + 1,
+              third == std::string::npos ? std::string::npos
+                                         : third - second - 1);
+    const std::string system = (third == std::string::npos)
+        ? std::string("neutral")
+        : line.substr(third + 1);
+    const int result = answer(kind, hex, tailoring, system);
     if (result != 0) {
       return result;
     }

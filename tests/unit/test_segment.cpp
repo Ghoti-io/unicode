@@ -96,11 +96,16 @@ TEST(Segment, TheThreeLineBreakTailoringsDiffer) {
   const GUNI_BreakOptions loose =
       options_for(GUNI_BREAK_LINE, GUNI_LINE_BREAK_LOOSE);
 
+  /* **`normal` keeps it too**, which is the correction CSS Text forced: breaks
+   * before class CJ are "forbidden for normal and strict line breaking and
+   * allowed in loose". This test asserted the opposite for as long as the
+   * header claimed `normal` resolved CJ to ID. */
   EXPECT_FALSE(guni_break_at_codepoints(&strict, kana.data(), kana.size(), 1))
       << "strict keeps the prolonged sound mark with its character";
-  EXPECT_TRUE(guni_break_at_codepoints(&normal, kana.data(), kana.size(), 1))
-      << "normal allows the break";
-  EXPECT_TRUE(guni_break_at_codepoints(&loose, kana.data(), kana.size(), 1));
+  EXPECT_FALSE(guni_break_at_codepoints(&normal, kana.data(), kana.size(), 1))
+      << "and so does normal: CSS forbids this break for both";
+  EXPECT_TRUE(guni_break_at_codepoints(&loose, kana.data(), kana.size(), 1))
+      << "loose is the only value that allows it";
 
   /* And the resolution function says the same thing on its own, which is what
    * regex will call when it applies LB1 itself. */
@@ -109,13 +114,30 @@ TEST(Segment, TheThreeLineBreakTailoringsDiffer) {
       GUNI_LB_NS);
   EXPECT_EQ(guni_line_break_resolve(GUNI_LB_CJ, GUNI_GC_LM,
                 GUNI_LINE_BREAK_NORMAL),
-      GUNI_LB_ID);
+      GUNI_LB_NS);
   EXPECT_EQ(guni_line_break_resolve(GUNI_LB_CJ, GUNI_GC_LM,
                 GUNI_LINE_BREAK_LOOSE),
       GUNI_LB_ID);
   /* Zero is strict, so a caller who does not choose gets regex's behaviour
    * and the Standard's worked example. */
   EXPECT_EQ(static_cast<GUNI_LineBreakTailoring>(0), GUNI_LINE_BREAK_STRICT);
+  /* And zero is a neutral writing system, under which normal and strict are
+   * the same rule set - so the axis that separates them has to be asked for. */
+  EXPECT_EQ(static_cast<GUNI_WritingSystem>(0), GUNI_WRITING_SYSTEM_NEUTRAL);
+
+  /* What *does* separate normal from strict: the CJK hyphens, in Japanese or
+   * Chinese text only. U+301C is Nonstarter, so LB21 is what normal lifts. */
+  const std::vector<uint32_t> wave = {0x4E00, 0x301C, 0x4E00};
+  GUNI_BreakOptions normal_ja = normal;
+  normal_ja.writing_system = GUNI_WRITING_SYSTEM_JAPANESE;
+  GUNI_BreakOptions strict_ja = strict;
+  strict_ja.writing_system = GUNI_WRITING_SYSTEM_JAPANESE;
+  EXPECT_TRUE(guni_break_at_codepoints(&normal_ja, wave.data(), wave.size(), 1))
+      << "normal allows a break before U+301C in Japanese text";
+  EXPECT_FALSE(guni_break_at_codepoints(&strict_ja, wave.data(), wave.size(), 1))
+      << "strict never does";
+  EXPECT_FALSE(guni_break_at_codepoints(&normal, wave.data(), wave.size(), 1))
+      << "and neither does normal when no writing system is claimed";
 }
 
 TEST(Segment, Lb1ResolvesTheOtherFourClassesTheSameWayForEveryone) {
@@ -144,20 +166,77 @@ TEST(Segment, Lb1ResolvesTheOtherFourClassesTheSameWayForEveryone) {
 }
 
 /** A codepoint for each unresolved Line_Break class, found in the data. */
+/**
+ * One codepoint per Line_Break class, plus the codepoints CSS Text names.
+ *
+ * The first codepoint of each class is the sample, which covers every pair of
+ * *classes* - and **that is structurally unable to see a rule written about
+ * particular characters.** CSS Text's tailorings are largely of that kind: six
+ * iteration marks and ten centred punctuation marks inside class NS, two hyphens
+ * inside HH, and class PO or PR qualified by East_Asian_Width. A sweep over
+ * class representatives reported the Japanese columns as identical to the
+ * neutral ones, which read as "the writing system changes nothing" when what it
+ * meant was "this sample cannot reach the rules that would show it".
+ *
+ * So the named characters are added as extra entries, keyed by a label rather
+ * than by a class so that two rows can share a class. `guni_value_name` cannot
+ * name them, which is why entries carry their own label.
+ */
 class LineBreakSamples {
 public:
   LineBreakSamples() {
+    std::map<GUNI_LineBreak, uint32_t> first_of_class;
     for (uint32_t cp = 1; cp <= GUNI_MAX_CODEPOINT; ++cp) {
       GUNI_LineBreak class_ = guni_line_break(cp);
-      if (by_class_.find(class_) == by_class_.end()) {
-        by_class_[class_] = cp;
+      if (first_of_class.find(class_) == first_of_class.end()) {
+        first_of_class[class_] = cp;
       }
     }
+    classes_ = first_of_class.size();
+    for (const auto & entry : first_of_class) {
+      entries_.push_back({guni_value_name(GUNI_PROPERTY_LINE_BREAK,
+                              static_cast<uint32_t>(entry.first)),
+          entry.second});
+    }
+    /* Every character CSS Text section 5.2 names, one row each, so that the
+     * fixture covers the rule and not merely the class it lives in. */
+    static const struct {
+      const char * label;
+      uint32_t codepoint;
+    } named[] = {
+        {"cjk-hyphen-301C", 0x301C}, {"cjk-hyphen-30A0", 0x30A0},
+        {"hyphen-2010", 0x2010}, {"hyphen-2013", 0x2013},
+        {"iteration-3005", 0x3005}, {"iteration-303B", 0x303B},
+        {"iteration-309D", 0x309D}, {"iteration-309E", 0x309E},
+        {"iteration-30FD", 0x30FD}, {"iteration-30FE", 0x30FE},
+        {"inseparable-2025", 0x2025}, {"inseparable-2026", 0x2026},
+        {"centred-30FB", 0x30FB}, {"centred-FF1A", 0xFF1A},
+        {"centred-FF1B", 0xFF1B}, {"centred-FF65", 0xFF65},
+        {"centred-203C", 0x203C}, {"centred-2047", 0x2047},
+        {"centred-2048", 0x2048}, {"centred-2049", 0x2049},
+        {"centred-FF01", 0xFF01}, {"centred-FF1F", 0xFF1F},
+        {"suffix-wide-FF05", 0xFF05}, {"suffix-narrow-0025", 0x0025},
+        {"prefix-wide-FFE5", 0xFFE5}, {"prefix-narrow-0024", 0x0024},
+        {"small-kana-3041", 0x3041}, {"prolonged-30FC", 0x30FC},
+        {"ideograph-4E00", 0x4E00},
+    };
+    for (const auto & entry : named) {
+      entries_.push_back({entry.label, entry.codepoint});
+    }
   }
-  const std::map<GUNI_LineBreak, uint32_t> & all() const { return by_class_; }
+
+  struct Entry {
+    std::string label;
+    uint32_t codepoint;
+  };
+
+  const std::vector<Entry> & all() const { return entries_; }
+  /** How many of the entries are class representatives rather than named. */
+  size_t classes() const { return classes_; }
 
 private:
-  std::map<GUNI_LineBreak, uint32_t> by_class_;
+  std::vector<Entry> entries_;
+  size_t classes_ = 0;
 };
 
 TEST(Segment, ThePairwiseLineBreakSweepIsUnchanged) {
@@ -170,32 +249,43 @@ TEST(Segment, ThePairwiseLineBreakSweepIsUnchanged) {
    *
    * Regenerate with GUNI_BREAK_DUMP=pairs. */
   static const LineBreakSamples samples;
-  ASSERT_GT(samples.all().size(), static_cast<size_t>(40))
-      << "only " << samples.all().size() << " Line_Break classes found";
+  ASSERT_GT(samples.classes(), static_cast<size_t>(40))
+      << "only " << samples.classes() << " Line_Break classes found";
+  ASSERT_GT(samples.all().size(), samples.classes())
+      << "the CSS-named characters are not in the sample, so the rules written "
+         "about particular characters are not covered by this sweep";
 
   std::string produced;
   produced += "# Every ordered pair of Line_Break classes, as two codepoints,\n";
-  produced += "# and whether a line break is allowed between them under each\n";
-  produced += "# of the three LB1 tailorings. A regression record: the oracle\n";
-  produced += "# is LineBreakTest.txt. Regenerate with GUNI_BREAK_DUMP=pairs.\n";
-  produced += "# left right strict normal loose\n";
+  produced += "# and whether a line break is allowed between them under each of\n";
+  produced += "# CSS Text's line-break values, in a neutral writing system and\n";
+  produced += "# then in Japanese. Six columns rather than three because four of\n";
+  produced += "# the tailorings apply only to Chinese and Japanese text, and\n";
+  produced += "# under a neutral system normal and strict are the same rules.\n";
+  produced += "# `anywhere` is not here: it does not read Line_Break at all.\n";
+  produced += "# A regression record: the oracle is LineBreakTest.txt and the\n";
+  produced += "# ICU differential. Regenerate with GUNI_BREAK_DUMP=pairs.\n";
+  produced += "# left right strict normal loose strict_ja normal_ja loose_ja\n";
+  static const GUNI_WritingSystem systems[2] = {
+      GUNI_WRITING_SYSTEM_NEUTRAL, GUNI_WRITING_SYSTEM_JAPANESE};
   for (const auto & left : samples.all()) {
     for (const auto & right : samples.all()) {
-      const std::vector<uint32_t> pair = {left.second, right.second};
-      char line[128];
-      bool answers[3];
-      for (int which = 0; which < 3; ++which) {
-        const GUNI_BreakOptions options = options_for(GUNI_BREAK_LINE,
-            static_cast<GUNI_LineBreakTailoring>(which));
-        answers[which] =
-            guni_break_at_codepoints(&options, pair.data(), pair.size(), 1);
+      const std::vector<uint32_t> pair = {left.codepoint, right.codepoint};
+      char line[160];
+      bool answers[6];
+      for (int system = 0; system < 2; ++system) {
+        for (int which = 0; which < 3; ++which) {
+          GUNI_BreakOptions options = options_for(GUNI_BREAK_LINE,
+              static_cast<GUNI_LineBreakTailoring>(which));
+          options.writing_system = systems[system];
+          answers[system * 3 + which] =
+              guni_break_at_codepoints(&options, pair.data(), pair.size(), 1);
+        }
       }
-      std::snprintf(line, sizeof(line), "%s %s %d %d %d\n",
-          guni_value_name(GUNI_PROPERTY_LINE_BREAK,
-              static_cast<uint32_t>(left.first)),
-          guni_value_name(GUNI_PROPERTY_LINE_BREAK,
-              static_cast<uint32_t>(right.first)),
-          answers[0] ? 1 : 0, answers[1] ? 1 : 0, answers[2] ? 1 : 0);
+      std::snprintf(line, sizeof(line), "%s %s %d %d %d %d %d %d\n",
+          left.label.c_str(), right.label.c_str(),
+          answers[0] ? 1 : 0, answers[1] ? 1 : 0, answers[2] ? 1 : 0,
+          answers[3] ? 1 : 0, answers[4] ? 1 : 0, answers[5] ? 1 : 0);
       produced += line;
     }
   }
@@ -247,24 +337,63 @@ TEST(Segment, ThePairwiseLineBreakSweepIsUnchanged) {
                              : expected_end - start)
                   << "\nRegenerate with GUNI_BREAK_DUMP=pairs and read the diff.";
   }
-  /* And the axis is actually open: the three tailorings do not all agree. */
-  size_t differing = 0;
+  /* And every axis is actually open, which is what stops the arguments from
+   * being decorative. Three claims, because the axes are not equivalent:
+   *
+   *   strict vs loose      differs with no writing system claimed
+   *   strict vs normal     differs ONLY in Chinese or Japanese - so asking it
+   *                        without one is the check that used to pass here and
+   *                        now cannot, because CSS gives them the same rules
+   *   neutral vs Japanese  differs, at some pair, for at least one value
+   *
+   * The second is the interesting one: this test previously asserted that some
+   * pair separates strict from normal in a neutral writing system, and that
+   * assertion was satisfied only by the defect - `normal` resolving CJ to ID. */
+  size_t strict_vs_loose = 0;
+  size_t strict_vs_normal_neutral = 0;
+  size_t strict_vs_normal_ja = 0;
+  size_t neutral_vs_ja = 0;
   for (const auto & left : samples.all()) {
     for (const auto & right : samples.all()) {
-      const std::vector<uint32_t> pair = {left.second, right.second};
-      const GUNI_BreakOptions strict =
+      const std::vector<uint32_t> pair = {left.codepoint, right.codepoint};
+      GUNI_BreakOptions strict =
           options_for(GUNI_BREAK_LINE, GUNI_LINE_BREAK_STRICT);
-      const GUNI_BreakOptions normal =
+      GUNI_BreakOptions normal =
           options_for(GUNI_BREAK_LINE, GUNI_LINE_BREAK_NORMAL);
-      if (guni_break_at_codepoints(&strict, pair.data(), 2, 1)
-          != guni_break_at_codepoints(&normal, pair.data(), 2, 1)) {
-        ++differing;
-      }
+      GUNI_BreakOptions loose =
+          options_for(GUNI_BREAK_LINE, GUNI_LINE_BREAK_LOOSE);
+      GUNI_BreakOptions normal_ja = normal;
+      normal_ja.writing_system = GUNI_WRITING_SYSTEM_JAPANESE;
+      GUNI_BreakOptions strict_ja = strict;
+      strict_ja.writing_system = GUNI_WRITING_SYSTEM_JAPANESE;
+      GUNI_BreakOptions loose_ja = loose;
+      loose_ja.writing_system = GUNI_WRITING_SYSTEM_JAPANESE;
+
+      const bool s = guni_break_at_codepoints(&strict, pair.data(), 2, 1);
+      const bool n = guni_break_at_codepoints(&normal, pair.data(), 2, 1);
+      const bool l = guni_break_at_codepoints(&loose, pair.data(), 2, 1);
+      const bool s_ja = guni_break_at_codepoints(&strict_ja, pair.data(), 2, 1);
+      const bool n_ja = guni_break_at_codepoints(&normal_ja, pair.data(), 2, 1);
+      const bool l_ja = guni_break_at_codepoints(&loose_ja, pair.data(), 2, 1);
+
+      strict_vs_loose += (s != l) ? 1 : 0;
+      strict_vs_normal_neutral += (s != n) ? 1 : 0;
+      strict_vs_normal_ja += (s_ja != n_ja) ? 1 : 0;
+      neutral_vs_ja += (s != s_ja || n != n_ja || l != l_ja) ? 1 : 0;
     }
   }
-  EXPECT_GT(differing, static_cast<size_t>(0))
-      << "no pair of classes distinguishes strict from normal, which would "
-         "mean the tailoring argument does nothing";
+  EXPECT_GT(strict_vs_loose, static_cast<size_t>(0))
+      << "no pair separates strict from loose, so the tailoring does nothing";
+  EXPECT_EQ(strict_vs_normal_neutral, static_cast<size_t>(0))
+      << "strict and normal must agree everywhere with no writing system "
+         "claimed: CSS Text gives them the same rules outside Chinese and "
+         "Japanese, and a difference here is the defect this test used to "
+         "assert as a feature";
+  EXPECT_GT(strict_vs_normal_ja, static_cast<size_t>(0))
+      << "no pair separates strict from normal in Japanese either, so the "
+         "CJK-hyphen tailoring is not reached";
+  EXPECT_GT(neutral_vs_ja, static_cast<size_t>(0))
+      << "the writing system changes nothing, so its field does nothing";
 }
 
 /** A provider that breaks every three characters, to prove the seam works. */
@@ -609,56 +738,170 @@ TEST(Segment, AnSaRunBeginningAfterOtherTextIsStillARun) {
   EXPECT_EQ(found, std::vector<size_t>({2, 3, 4}));
 }
 
-TEST(Segment, LooseIsLb1AndNotTheWholeOfCssLoose) {
-  /* What the ICU differential found, recorded so that a change to it is
-   * deliberate. `make check-oracle-icu` compares this library against ICU 78.3
-   * and agrees everywhere except two places, and both are CSS Text tailorings
-   * that sit on top of UAX #14's LB1 rather than inside it:
+TEST(Segment, LooseIsTheWholeOfCssLoose) {
+  /* CSS Text section 5.2, rule by rule. This test replaced one that asserted
+   * the *opposite* - that this library implemented LB1 and none of the rest -
+   * which was true, recorded honestly, and a conformance gap rather than a
+   * decision. The ICU differential found two of the eight; reading the
+   * specification found the other six, including one ICU does not implement
+   * either (the hyphens) and one that corrects `normal`.
    *
-   *  1. CSS `loose` permits a break *before* the six Japanese iteration marks.
-   *     UAX #14 does not: they are Line_Break NS, and LB21's `x NS` forbids it.
-   *  2. CSS `loose` permits a break *between two* Inseparable characters. LB22's
-   *     `x IN` forbids it unconditionally.
-   *
-   * This test asserts this library's answer, which is the Standard's. If either
-   * of these is ever implemented - through GUNI_BreakProvider, per design.md
-   * section 9 - this test is the one that has to change, and the differential's
-   * explanation table with it. The differential cannot catch a *regression*
-   * here, because a change in this direction would make us agree with ICU and
-   * its gate would go quiet; only an assertion on our own answer can. */
-  static const uint32_t marks[] = {
-      0x3005, 0x303B, 0x309D, 0x309E, 0x30FD, 0x30FE};
-  for (const uint32_t mark : marks) {
-    const std::vector<uint32_t> text = {0x4E00, mark, 0x4E00};
-    for (int which = 0; which < 3; ++which) {
-      const GUNI_BreakOptions options = options_for(GUNI_BREAK_LINE,
-          static_cast<GUNI_LineBreakTailoring>(which));
-      EXPECT_FALSE(guni_break_at_codepoints(&options, text.data(), text.size(), 1))
-          << "U+" << std::hex << mark
-          << " is NS, and LB21 forbids a break before it in every tailoring"
-          << " - including loose, where CSS would permit one";
-    }
+   * Every case is a minimal pair so that a failure names one rule. The left
+   * character is Han (class ID) except where a rule needs otherwise. */
+  const uint32_t han = 0x4E00;
+
+  GUNI_BreakOptions strict = options_for(GUNI_BREAK_LINE,
+      GUNI_LINE_BREAK_STRICT);
+  GUNI_BreakOptions normal = options_for(GUNI_BREAK_LINE,
+      GUNI_LINE_BREAK_NORMAL);
+  GUNI_BreakOptions loose = options_for(GUNI_BREAK_LINE, GUNI_LINE_BREAK_LOOSE);
+  GUNI_BreakOptions strict_ja = strict;
+  GUNI_BreakOptions normal_ja = normal;
+  GUNI_BreakOptions loose_ja = loose;
+  strict_ja.writing_system = GUNI_WRITING_SYSTEM_JAPANESE;
+  normal_ja.writing_system = GUNI_WRITING_SYSTEM_JAPANESE;
+  loose_ja.writing_system = GUNI_WRITING_SYSTEM_JAPANESE;
+
+  auto breaks = [](const GUNI_BreakOptions & options, uint32_t left,
+                    uint32_t right) {
+    const std::vector<uint32_t> pair = {left, right};
+    return guni_break_at_codepoints(&options, pair.data(), pair.size(), 1);
+  };
+
+  /* 1. CJK hyphen-like characters: normal and loose, Chinese or Japanese only. */
+  for (const uint32_t cp : {0x301CU, 0x30A0U}) {
+    EXPECT_TRUE(breaks(normal_ja, han, cp)) << std::hex << cp;
+    EXPECT_TRUE(breaks(loose_ja, han, cp)) << std::hex << cp;
+    EXPECT_FALSE(breaks(strict_ja, han, cp)) << std::hex << cp;
+    EXPECT_FALSE(breaks(normal, han, cp))
+        << "no writing system claimed, so the rule does not apply";
+    EXPECT_FALSE(breaks(loose, han, cp));
   }
 
-  /* U+2026 HORIZONTAL ELLIPSIS and U+22EF MIDLINE HORIZONTAL ELLIPSIS are both
-   * Line_Break IN. The neighbouring pairs are asserted too, because the
-   * divergence is between two Inseparables and not "before an Inseparable", and
-   * a test that did not pin that down would pass against the wrong rule. */
-  ASSERT_EQ(guni_line_break(0x2026), GUNI_LB_IN);
-  ASSERT_EQ(guni_line_break(0x22EF), GUNI_LB_IN);
-  for (int which = 0; which < 3; ++which) {
-    const GUNI_BreakOptions options = options_for(GUNI_BREAK_LINE,
-        static_cast<GUNI_LineBreakTailoring>(which));
-    const std::vector<uint32_t> in_in = {0x2026, 0x22EF};
-    EXPECT_FALSE(guni_break_at_codepoints(&options, in_in.data(), in_in.size(), 1))
-        << "LB22 forbids a break before IN in every tailoring";
-    const std::vector<uint32_t> in_id = {0x2026, 0x4E00};
-    EXPECT_TRUE(guni_break_at_codepoints(&options, in_id.data(), in_id.size(), 1))
-        << "IN x ID does break, and ICU agrees in all three tailorings";
-    const std::vector<uint32_t> id_in = {0x4E00, 0x2026};
-    EXPECT_FALSE(guni_break_at_codepoints(&options, id_in.data(), id_in.size(), 1))
-        << "ID x IN does not, and ICU agrees in all three tailorings";
+  /* 2. Hyphens, loose only, and only after an ID character - a condition on the
+   *    neighbour rather than on the writing system, so it holds in neutral. */
+  for (const uint32_t cp : {0x2010U, 0x2013U}) {
+    EXPECT_TRUE(breaks(loose, han, cp)) << std::hex << cp;
+    EXPECT_FALSE(breaks(normal, han, cp)) << std::hex << cp;
+    EXPECT_FALSE(breaks(loose, 'A', cp))
+        << "the preceding character must be ID, and Latin A is AL";
   }
+
+  /* 3. Class CJ, loose only. This is LB1 and is asserted in full elsewhere. */
+  EXPECT_TRUE(breaks(loose, han, 0x3041));
+  EXPECT_FALSE(breaks(normal, han, 0x3041));
+
+  /* 4. Iteration marks, loose only, in any writing system. */
+  for (const uint32_t cp : {0x3005U, 0x303BU, 0x309DU, 0x309EU, 0x30FDU, 0x30FEU}) {
+    EXPECT_TRUE(breaks(loose, han, cp)) << std::hex << cp;
+    EXPECT_FALSE(breaks(normal, han, cp)) << std::hex << cp;
+    EXPECT_FALSE(breaks(strict, han, cp)) << std::hex << cp;
+  }
+
+  /* 5. Between two Inseparables, loose only. *Between*, so the pair matters:
+   *    ID x IN keeps LB22 and only IN x IN lifts it. */
+  ASSERT_EQ(guni_line_break(0x2025), GUNI_LB_IN);
+  ASSERT_EQ(guni_line_break(0x2026), GUNI_LB_IN);
+  EXPECT_TRUE(breaks(loose, 0x2025, 0x2026));
+  EXPECT_FALSE(breaks(normal, 0x2025, 0x2026));
+  EXPECT_FALSE(breaks(loose, han, 0x2026))
+      << "ID x IN is not a pair of Inseparables";
+
+  /* 6. Centred punctuation, loose and Chinese or Japanese only. U+FF01 and
+   *    U+FF1F are Exclamation rather than Nonstarter, so they prove the rule
+   *    runs before LB13 and not only before LB21. */
+  for (const uint32_t cp : {0x30FBU, 0xFF1AU, 0xFF1BU, 0xFF65U, 0x203CU,
+           0x2047U, 0x2048U, 0x2049U, 0xFF01U, 0xFF1FU}) {
+    EXPECT_TRUE(breaks(loose_ja, han, cp)) << std::hex << cp;
+    EXPECT_FALSE(breaks(loose, han, cp)) << std::hex << cp;
+    EXPECT_FALSE(breaks(normal_ja, han, cp)) << std::hex << cp;
+  }
+  EXPECT_EQ(guni_line_break(0xFF01), GUNI_LB_EX)
+      << "if this stops being EX the LB13 half of case 6 stops being tested";
+
+  /* 7 and 8. Suffixes and prefixes, by class and width rather than by
+   *    codepoint, so the narrow members of the same classes must NOT break. */
+  EXPECT_EQ(guni_line_break(0xFF05), GUNI_LB_PO);
+  EXPECT_EQ(guni_east_asian_width(0xFF05), GUNI_EAW_FULLWIDTH);
+  EXPECT_TRUE(breaks(loose_ja, han, 0xFF05)) << "PO and fullwidth";
+  EXPECT_FALSE(breaks(loose, han, 0xFF05));
+  EXPECT_EQ(guni_line_break(0x0025), GUNI_LB_PO);
+  EXPECT_EQ(guni_east_asian_width(0x0025), GUNI_EAW_NARROW);
+  EXPECT_FALSE(breaks(loose_ja, han, 0x0025))
+      << "PO but narrow, so the suffix rule must not reach it";
+
+  EXPECT_EQ(guni_line_break(0xFFE5), GUNI_LB_PR);
+  EXPECT_TRUE(breaks(loose_ja, 0xFFE5, han)) << "break AFTER a wide prefix";
+  EXPECT_FALSE(breaks(loose, 0xFFE5, han));
+  EXPECT_EQ(guni_line_break(0x0024), GUNI_LB_PR);
+  EXPECT_EQ(guni_east_asian_width(0x0024), GUNI_EAW_NARROW);
+  EXPECT_FALSE(breaks(loose_ja, 0x0024, han))
+      << "PR but narrow, so the prefix rule must not reach it";
+
+  /* And none of the eight may lift a prohibition CSS does not name. A break
+   * before a space is LB7 and stays forbidden under every value. */
+  for (const GUNI_BreakOptions & options : {strict, normal, loose, strict_ja,
+           normal_ja, loose_ja}) {
+    EXPECT_FALSE(breaks(options, han, 0x0020))
+        << "LB7: never break before a space";
+    EXPECT_FALSE(breaks(options, han, 0x0301))
+        << "LB9: never break before a combining mark";
+    EXPECT_FALSE(breaks(options, han, 0x2060))
+        << "LB11: never break before a word joiner";
+  }
+}
+
+TEST(Segment, AnywhereBreaksAroundEveryTypographicCharacterUnit) {
+  /* CSS `anywhere`, which is grapheme cluster boundaries with LB2 still
+   * excluding the start of text. */
+  GUNI_BreakOptions anywhere = options_for(GUNI_BREAK_LINE,
+      GUNI_LINE_BREAK_ANYWHERE);
+  GUNI_BreakOptions grapheme = options_for(GUNI_BREAK_GRAPHEME);
+  GUNI_BreakOptions strict = options_for(GUNI_BREAK_LINE,
+      GUNI_LINE_BREAK_STRICT);
+
+  /* The prohibitions CSS names explicitly: GL, WJ and ZWJ. Each is forbidden
+   * under strict and allowed under anywhere. */
+  const std::vector<uint32_t> nbsp = {'a', 0x00A0, 'b'};   /* GL */
+  const std::vector<uint32_t> joiner = {'a', 0x2060, 'b'}; /* WJ */
+  const std::vector<uint32_t> zwj = {'a', 0x200D, 'b'};    /* ZWJ */
+  for (const std::vector<uint32_t> * text : {&nbsp, &joiner, &zwj}) {
+    EXPECT_FALSE(guni_break_at_codepoints(&strict, text->data(), text->size(), 1))
+        << "the pair rules forbid this";
+    EXPECT_TRUE(guni_break_at_codepoints(&anywhere, text->data(), text->size(), 2))
+        << "anywhere disregards it";
+  }
+
+  /* What it does *not* disregard is the cluster itself: a combining mark stays
+   * with its base, because CSS says "around every typographic character unit"
+   * and not inside one. */
+  const std::vector<uint32_t> combining = {'a', 0x0301, 'b'};
+  EXPECT_FALSE(guni_break_at_codepoints(&anywhere, combining.data(),
+      combining.size(), 1))
+      << "a combining mark must not be left on a line of its own";
+  EXPECT_TRUE(guni_break_at_codepoints(&anywhere, combining.data(),
+      combining.size(), 2));
+
+  /* And CRLF stays one unit, because GB3 keeps it together. */
+  const std::vector<uint32_t> crlf = {'a', 0x000D, 0x000A, 'b'};
+  EXPECT_FALSE(guni_break_at_codepoints(&anywhere, crlf.data(), crlf.size(), 2))
+      << "GB3: never between CR and LF";
+
+  /* Over a whole string, anywhere agrees with the grapheme boundaries except
+   * at the start of text, which LB2 excludes and GB1 reports. */
+  const std::vector<uint32_t> mixed = {'a', 0x0301, 0x00A0, 0x4E00, 0x3041,
+      0x1F1EF, 0x1F1F5, 'z'};
+  std::vector<size_t> by_line = boundaries(anywhere, mixed);
+  std::vector<size_t> by_cluster = boundaries(grapheme, mixed);
+  ASSERT_FALSE(by_cluster.empty());
+  EXPECT_EQ(by_cluster.front(), static_cast<size_t>(0))
+      << "GB1 reports the start";
+  by_cluster.erase(by_cluster.begin());
+  EXPECT_EQ(by_line, by_cluster)
+      << "anywhere is the cluster boundaries, less the start of text";
+  /* The regional indicator pair is one cluster, so anywhere does not split it. */
+  EXPECT_FALSE(guni_break_at_codepoints(&anywhere, mixed.data(), mixed.size(), 6))
+      << "GB12/GB13 keep a flag together";
 }
 
 /**
@@ -709,6 +952,15 @@ int dump_from_stdin() {
        * a consumer moving from one to the other actually has. ICU's root
        * measures as strict, and that was measured rather than assumed. */
       {"default", GUNI_LINE_BREAK_STRICT},
+      {"anywhere", GUNI_LINE_BREAK_ANYWHERE},
+  };
+  static const struct {
+    const char * name;
+    GUNI_WritingSystem writing_system;
+  } systems[] = {
+      {"neutral", GUNI_WRITING_SYSTEM_NEUTRAL},
+      {"chinese", GUNI_WRITING_SYSTEM_CHINESE},
+      {"japanese", GUNI_WRITING_SYSTEM_JAPANESE},
   };
 
   std::string line;
@@ -722,13 +974,21 @@ int dump_from_stdin() {
       return 2;
     }
     const size_t second = line.find('\t', first + 1);
+    const size_t third = (second == std::string::npos)
+        ? std::string::npos
+        : line.find('\t', second + 1);
     const std::string kind_name = line.substr(0, first);
     const std::string hex = (second == std::string::npos)
         ? line.substr(first + 1)
         : line.substr(first + 1, second - first - 1);
     const std::string tailoring_name = (second == std::string::npos)
         ? std::string("strict")
-        : line.substr(second + 1);
+        : line.substr(second + 1,
+              third == std::string::npos ? std::string::npos
+                                         : third - second - 1);
+    const std::string system_name = (third == std::string::npos)
+        ? std::string("neutral")
+        : line.substr(third + 1);
 
     GUNI_BreakKind kind = GUNI_BREAK_KIND_COUNT;
     for (const auto & entry : kinds) {
@@ -744,9 +1004,17 @@ int dump_from_stdin() {
         known_tailoring = true;
       }
     }
-    if (kind == GUNI_BREAK_KIND_COUNT || !known_tailoring) {
-      std::fprintf(stderr, "guni break dump: %s/%s is not a request\n",
-          kind_name.c_str(), tailoring_name.c_str());
+    GUNI_WritingSystem writing_system = GUNI_WRITING_SYSTEM_NEUTRAL;
+    bool known_system = false;
+    for (const auto & entry : systems) {
+      if (system_name == entry.name) {
+        writing_system = entry.writing_system;
+        known_system = true;
+      }
+    }
+    if (kind == GUNI_BREAK_KIND_COUNT || !known_tailoring || !known_system) {
+      std::fprintf(stderr, "guni break dump: %s/%s/%s is not a request\n",
+          kind_name.c_str(), tailoring_name.c_str(), system_name.c_str());
       return 2;
     }
     if (hex.size() % 2 != 0) {
@@ -760,7 +1028,8 @@ int dump_from_stdin() {
           std::stoul(hex.substr(at, 2), nullptr, 16)));
     }
 
-    const GUNI_BreakOptions options = options_for(kind, tailoring);
+    GUNI_BreakOptions options = options_for(kind, tailoring);
+    options.writing_system = writing_system;
     size_t needed = 0;
     GUNI_Result result = guni_break_all(&options, text.data(), text.size(),
         nullptr, 0, &needed);
@@ -790,6 +1059,7 @@ int dump_from_stdin() {
     }
     std::printf("%s\t%s\t%s\n", kind_name.c_str(), hex.c_str(),
         answer.c_str());
+    (void)0;
   }
   std::fflush(stdout);
   return 0;
