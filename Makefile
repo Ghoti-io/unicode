@@ -902,6 +902,78 @@ install-conformance: ucd-present
 .PHONY: ucd-present gen-ucd-tables check-ucd-tables install-conformance
 
 ####################################################################
+# Oracles
+####################################################################
+#
+# The conformance files are the authority and they run in `make test`. An
+# oracle is a second opinion, and the pattern here is the suite-wide one in
+# notes/suite/CONTAINERS.md - this library is the first to land it.
+#
+# ORACLE_MODE decides where a reference runs and reaches the tools through the
+# environment; tools/oracle/oracle_env.py is the only place that knows how to
+# spell one.
+#
+#   container  (default) the reference in its image, pinned by digest in
+#              tools/oracle/containers/IMAGES
+#   host       this machine's own interpreter, which is a different claim and
+#              says "host, unpinned" in the line each gate prints
+#
+# There is deliberately no third mode that tries the container and falls back
+# to the host. A gate whose reference is not the one it names is worse than a
+# gate that did not run, because it prints the same green line.
+#
+# ORACLE_REQUIRED is the fail-closed half: an unreachable reference is an error
+# naming what is missing, rather than a skip. `command -v python3` is the shape
+# that rots, and this library is the proof - python3 has always been on PATH
+# here, and the reference it reached was two Unicode releases from the tables
+# it was checking, which is a question `command -v` cannot ask.
+#
+# **Neither target is in TEST_GATES**, for the reason the UCD section above
+# gives and for a second one of its own: the differential reads DerivedAge.txt
+# to know what is comparable, so it needs the fetched UCD as well as an engine.
+# `make test` needs neither, because what gates the tables on a fresh clone is
+# the committed sweep fixture.
+ORACLE_MODE ?= container
+ORACLE_REQUIRED ?= 1
+ORACLE_ENV := GHOTI_ORACLE_MODE=$(ORACLE_MODE) GHOTI_ORACLE_REQUIRED=$(ORACLE_REQUIRED)
+
+# One recipe line, so that a gate cannot forget the preamble. $(1) is the name
+# of the oracle in IMAGES; $(2) is the rest of the command.
+define run-oracle
+	@$(ORACLE_ENV) python3 tools/oracle/oracle_run.py $(1) -- $(2)
+endef
+
+check-oracle-unicodedata: ## Compare every per-codepoint property against CPython's unicodedata
+# Advisory, and it says so: the gating pin is a *released* CPython, and no
+# released CPython carries this library's UCD version yet. Every difference it
+# reports is triaged in the tool's header and none of them is this library's.
+# What it is really gating is that the comparison still happens at all - the
+# tool exits 1 if it compared nothing, which is the failure mode a differential
+# actually has.
+check-oracle-unicodedata: ucd-present $(TEST_EXECUTABLES)
+	$(call run-oracle,python,tools/oracle/unicodedata_diff.py)
+
+check-oracle-unicodedata-strict: ## The same, against a reference on this library's own UCD version
+# This is the one that can fail. python-next carries UCD 17.0.0, an exact match
+# with tools/ucd/UCD_VERSION, and against a matching reference there is no skew
+# left to excuse a disagreement: 7,947,413 comparisons over all 1,114,112
+# codepoints, and any difference is a defect in one of the two.
+#
+# The alias is how a second pin is asked the first one's questions; see
+# oracle_env.ALIAS. It is separate from the target above rather than replacing
+# it because the pin it uses is a release candidate, and because the difference
+# between the two references is itself a reading of what the Consortium changed.
+check-oracle-unicodedata-strict: ucd-present $(TEST_EXECUTABLES)
+	@GHOTI_ORACLE_ALIAS=python=python-next $(ORACLE_ENV) \
+		python3 tools/oracle/oracle_run.py python -- \
+		tools/oracle/unicodedata_diff.py --strict
+
+check-oracles: ## Run every differential
+check-oracles: check-oracle-unicodedata check-oracle-unicodedata-strict
+
+.PHONY: check-oracle-unicodedata check-oracle-unicodedata-strict check-oracles
+
+####################################################################
 # Tier layering
 ####################################################################
 #

@@ -16,55 +16,60 @@ kind of second source worth having: it can agree with us and be wrong only if
 the Consortium's data is wrong, and it disagrees the moment either of us has a
 parsing bug.
 
-**An oracle's Unicode version is the pin that matters, and it is rarely ours.**
-CPython's `unicodedata` tracks the interpreter release - 3.13 carries UCD 15.1
-where this library is on 17.0 - so a naive comparison reports every codepoint
-added since as a disagreement. This script therefore compares only codepoints
-whose `DerivedAge` is at most the oracle's version and **counts the rest as not
-comparable rather than as agreement** (documentation/design.md section 12.4). A
-run prints every number, because "12,000 agreed" means nothing without "and
-4,000 could not be compared".
+**An oracle's Unicode version is the pin that matters, and it used to be
+whatever this machine had.** The reference here was `import unicodedata` in this
+tool's own process, which is the one shape of oracle that cannot be pinned at
+all: Debian 13 gives CPython 3.13 and UCD 15.1 where these tables are 17.0.0,
+and the entire triage list this header used to carry was that skew rather than
+any defect. The reference is now `unicodedata_ask.py` run through
+`oracle_env.command()`, in an image pinned by digest in
+`containers/IMAGES` - the suite-wide pattern from `notes/suite/CONTAINERS.md`.
 
-**And that filter is necessary and not sufficient**, which measuring it was the
-only way to learn. `DerivedAge` says when a codepoint was *added*; it says
-nothing about when its *properties changed*, and between 15.1 and 17.0 they
-changed for codepoints that are decades old. U+0295 went from `Ll` to `Lo`,
-U+1171E from `Mn` to `Mc` and from `NSM` to `L`, the mathematical nablas from
-`L` to `ON`, U+226D became mirrored, and U+5146's numeric value went from a
-million to a million million. Every one of those is the Consortium changing its
-mind, and a differential two releases behind cannot tell that from a defect.
+Two pins, and the difference between them is the point:
 
-**The triage as it stands**, so that a reader does not re-derive it. Against
-CPython 3.13.5 (UCD 15.1) and this library on 17.0, every difference is
-accounted for and none of them is this library's:
+  * **python**, a released CPython on UCD 16.0.0. The gating pin, and still
+    behind these tables, so this is advisory against it.
+  * **python-next**, a release candidate on UCD **17.0.0** - an exact match with
+    `tools/ucd/UCD_VERSION`. Against a reference that matches, there is no skew
+    left to excuse a disagreement, and `--strict` says so with its exit status.
 
-  * `General_Category` 2, `Bidi_Class` 6, `East_Asian_Width` 188,
-    `Bidi_Mirrored` 1, `Numeric_Value` 1: the Consortium changed its mind.
-    U+0295 `Ll` to `Lo`; U+1171E `Mn` to `Mc` and `NSM` to `L`; the
-    mathematical nablas `L` to `ON`; U+2630..U+2637, the trigrams, and 180 more
-    symbols from `N` to `W`; U+226D newly mirrored; U+5146 a million to a
-    million million. Each spot-checked against the 17.0 files rather than
-    assumed - the first draft of this list claimed East_Asian_Width agreed
-    everywhere, and it does not;
-  * `Numeric_Value` 8 "ours only": cuneiform signs given values after 15.1;
-  * `Name` 6,145 "ours only": the Tangut ideographs. CPython computes the CJK
-    and Hangul algorithmic names and not these, which is the oracle's
-    limitation and not a missing name;
-  * `Decomposition_Type` over the Hangul syllables is skipped outright, for the
-    same kind of reason: `unicodedata.decomposition()` returns the mapping
-    `UnicodeData.txt` records, and a Hangul syllable's is arithmetic and
-    recorded nowhere.
+Measured 2026-09-24, and these are the numbers the two pins give:
 
-`Canonical_Combining_Class` agrees on all 289,460 comparable codepoints, and
-every other property agrees on all but the handful above - which is the part
-that would have caught a parsing bug, and is the reason to keep the script even
-with a version skew it cannot filter.
+    make check-oracle-unicodedata           UCD 16.0.0   2 differed, 6153 ours only
+    make check-oracle-unicodedata-strict    UCD 17.0.0   0 differed, 0 ours only
 
-So this is **advisory by default**: it reports and exits 0, because with a
-version skew the disagreements are expected and the triage is a person's. Run
-it with `--strict` where the oracle's UCD version matches the library's - which
-is what the container images in `notes/suite/CONTAINERS.md` are for - and then
-any disagreement is a defect and the exit status says so.
+**What the matching pin retired.** Against UCD 15.1 this header carried a
+five-category triage of 198 differences and 6,153 "ours only". At 16.0.0 that is
+down to two differences, and at 17.0.0 to none:
+
+  * `General_Category` U+0295 `Ll` to `Lo` and `Numeric_Value` U+5146 a million
+    to a million million - the two Consortium decisions that land in 17.0 rather
+    than 16.0, and the whole of what the 16.0 pin still reports;
+  * `Bidi_Class` 6, `East_Asian_Width` 188 and `Bidi_Mirrored` 1 - all 16.0
+    changes, and all gone at the 16.0 pin;
+  * `Numeric_Value` 8 "ours only", cuneiform signs given values after 15.1, and
+    `Name` 6,145 "ours only", the Tangut ideographs. CPython 3.15 computes the
+    Tangut algorithmic names, so these are gone at 17.0.0 too - they were the
+    oracle's limitation, exactly as the earlier triage said.
+
+**DerivedAge excludes only what is newer than the oracle**, and the first
+version of this excluded every unassigned codepoint as well - 814,664 of them,
+73% of the codespace, reported as "not comparable". That was wrong in a way that
+read as caution: assignments are never withdrawn, so a codepoint unassigned in
+17.0.0 is unassigned in every earlier version, and both sides have an answer for
+it. Comparing them is what takes the strict run from 2.2 million comparisons to
+7,947,413, and it puts the end of every run in the trie under the oracle's eye -
+a last range one codepoint too long is the defect this differential is best
+placed to catch and was structurally unable to see.
+
+`Decomposition_Type` over the Hangul syllables is still skipped, and for a
+reason that is the oracle's rather than the data's: `unicodedata.decomposition()`
+returns the mapping `UnicodeData.txt` records, and a Hangul syllable's is
+arithmetic and recorded nowhere. The UCD's own `DerivedDecompositionType.txt`
+says `Canonical` for all 11,172 of them, which is what this library says. Every
+skip is now counted under the reason for it, because one figure covering three
+different reasons means something different against a matching pin while
+printing the same.
 
 What is compared: General_Category, Canonical_Combining_Class, Bidi_Class,
 East_Asian_Width, Bidi_Mirrored, Decomposition_Type, Numeric_Value and the
@@ -79,8 +84,13 @@ already links the library.
 
 Usage:
     make test                                   # build the binaries first
-    tools/oracle/unicodedata_diff.py
+    make check-oracle-unicodedata               # the released pin, advisory
+    make check-oracle-unicodedata-strict        # the matching pin, and it fails
     tools/oracle/unicodedata_diff.py --property Bidi_Class
+
+It needs the fetched UCD, for `DerivedAge.txt`: run `tools/ucd/fetch.sh` first.
+That is the second reason neither target is in `TEST_GATES`, the first being
+that a differential needs a container engine and `make test` must not.
 
 Exit status is 1 on any disagreement, and 1 if it could compare nothing.
 """
@@ -89,13 +99,15 @@ import argparse
 import os
 import subprocess
 import sys
-import unicodedata
 from fractions import Fraction
 
 MAX_CODEPOINT = 0x10FFFF
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(HERE))
+
+sys.path.insert(0, HERE)
+import oracle_env
 
 
 def version_tuple(text):
@@ -168,6 +180,86 @@ def dump_names(binary):
     return out
 
 
+ORACLE = "python"
+
+
+def ask_oracle(properties, scratch=None):
+    """One process, every property, run-encoded. Returns (UCD version, runs).
+
+    The reference used to be `import unicodedata` in this process, which made
+    "the reference" whichever interpreter ran the tool - the one pin that cannot
+    be written down anywhere. It is now `tools/oracle/unicodedata_ask.py`, run
+    through `oracle_env.command()` so that it lands in the image pinned by
+    digest in `containers/IMAGES`.
+
+    One process for the whole run, not one per property and emphatically not one
+    per codepoint. `notes/suite/CONTAINERS.md` measures what that costs: about
+    200ms for the engine, paid once.
+
+    The frame header carries the property's name and an exact line count, and
+    both are checked. A parent that loses sync with this child would not notice
+    otherwise, and there is a live way to lose it - the engine on this machine
+    writes a banner to stderr on every invocation, so a driver that merged the
+    streams would read it as an answer.
+    """
+    requests = ["version"] + list(properties)
+    argv = oracle_env.command(ORACLE, ["python3",
+        os.path.join(HERE, "unicodedata_ask.py")], scratch=scratch)
+    child = subprocess.Popen(argv, stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE, text=True)
+    out, _ = child.communicate("\n".join(requests) + "\n")
+    if child.returncode != 0:
+        raise SystemExit("the oracle driver exited %d" % child.returncode)
+
+    lines = out.splitlines()
+    at = 0
+    answers = {}
+    for name in requests:
+        if at >= len(lines):
+            raise SystemExit("the oracle stopped answering before %s" % name)
+        head = lines[at].split("\t")
+        at += 1
+        if len(head) != 2 or head[0] != name:
+            raise SystemExit("asked for %s and the frame says %r"
+                             % (name, lines[at - 1]))
+        count = int(head[1])
+        body, at = lines[at:at + count], at + count
+        if len(body) != count:
+            raise SystemExit("%s: the frame promised %d lines and %d arrived"
+                             % (name, count, len(body)))
+        answers[name] = body
+    if at != len(lines):
+        raise SystemExit("%d lines arrived after the last frame" % (len(lines) - at))
+
+    unidata = answers.pop("version")[0].split("\t")[1]
+    runs = {}
+    for name, body in answers.items():
+        table = []
+        for line in body:
+            bounds, _tab, value = line.partition("\t")
+            low, dots, high = bounds.partition("..")
+            first = int(low, 16)
+            table.append((first, int(high, 16) if dots else first,
+                          None if value == "-" else value))
+        runs[name] = table
+    return unidata, runs
+
+
+def expand(table):
+    """A run table as one value per codepoint, for a lookup by codepoint.
+
+    Both sides of every comparison here are run tables, but our side is walked
+    run by run and the oracle's has to be read at an arbitrary codepoint inside
+    one of ours, so one of the two has to be flattened. One property at a time,
+    which is where the memory goes.
+    """
+    out = [None] * (MAX_CODEPOINT + 1)
+    for first, last, value in table:
+        for cp in range(first, last + 1):
+            out[cp] = value
+    return out
+
+
 class Comparison:
     """One property's tally, in four buckets.
 
@@ -192,7 +284,22 @@ class Comparison:
         self.ours_only = 0
         self.theirs_only = 0
         self.incomparable = 0
+        self.reasons = {}
         self.examples = []
+
+    def skip(self, reason):
+        """Not compared, and *why*.
+
+        One number for this used to be enough, because there was only ever one
+        reason: the oracle was two releases behind and most of the codespace was
+        newer than it. Against a pin that matches the library's UCD that reason
+        disappears and the others do not, and a single figure then means
+        something quite different while printing the same. A reader cannot tell
+        "the reference does not reach here" from "nothing is here" without being
+        told which.
+        """
+        self.incomparable += 1
+        self.reasons[reason] = self.reasons.get(reason, 0) + 1
 
     def check(self, cp, ours, theirs):
         if ours == theirs:
@@ -217,6 +324,11 @@ class Comparison:
               "  %9d not comparable  %s"
               % (self.name, self.agreed, self.differed, self.ours_only,
                  self.theirs_only, self.incomparable, status))
+        if self.reasons:
+            print("      not comparable: %s"
+                  % ", ".join("%d %s" % (count, reason) for reason, count
+                              in sorted(self.reasons.items(),
+                                        key=lambda pair: -pair[1])))
         for cp, ours, theirs in self.examples:
             print("      U+%04X: ours %r, unicodedata %r" % (cp, ours, theirs))
 
@@ -248,75 +360,102 @@ def main(argv):
         if not os.path.exists(binary):
             raise SystemExit("%s is not built; run make test first" % binary)
 
-    oracle_version = version_tuple(unicodedata.unidata_version)
-    print("oracle(host): CPython %s, unicodedata %s"
-          % (sys.version.split()[0], unicodedata.unidata_version))
+    order = ["General_Category", "Bidi_Class", "East_Asian_Width",
+             "Canonical_Combining_Class", "Bidi_Mirrored", "Decomposition_Type",
+             "Numeric_Value", "Name"]
+    wanted = args.property
+    if wanted:
+        unknown = [name for name in wanted if name not in order]
+        if unknown:
+            raise SystemExit("not a property this compares: %s"
+                             % ", ".join(unknown))
+    asking = [name for name in order if not wanted or name in wanted]
+
+    unidata, oracle = ask_oracle(asking)
+    oracle_version = version_tuple(unidata)
+    print("reference: unicodedata %s" % unidata)
     print("library: UCD %s" % version)
     if oracle_version < version_tuple(version):
         print("the oracle is behind, so every codepoint assigned after %s is "
-              "not comparable" % unicodedata.unidata_version)
+              "not comparable" % unidata)
     print()
 
     ages = read_derived_age(ucd_dir)
     aliases = read_value_aliases(ucd_dir)
 
-    def comparable(cp):
-        age = ages[cp]
-        return age is not None and age <= oracle_version
+    def too_new(cp):
+        """The one reason DerivedAge can give for not comparing a codepoint.
 
-    # (property, the key PropertyValueAliases uses, how to ask unicodedata)
+        The first version of this also excluded every codepoint with no age at
+        all - 814,664 of them, unassigned - and that was wrong in a way worth
+        recording, because it read as caution. Assignments are never withdrawn,
+        so a codepoint unassigned in 17.0.0 is unassigned in every earlier
+        version too, and *both sides have an answer for it*: `Cn`, width `N`,
+        combining class 0, no name. Excluding them left the differential unable
+        to see the one defect it is best placed to catch - a run table whose last
+        range runs one codepoint past the end of its block - across 73% of the
+        codespace, while reporting the omission as "not comparable".
+        """
+        age = ages[cp]
+        return age is not None and age > oracle_version
+
+    # (property, the key PropertyValueAliases uses)
     scalar = [
-        ("General_Category", "gc", lambda ch: unicodedata.category(ch)),
-        ("Bidi_Class", "bc", lambda ch: unicodedata.bidirectional(ch)),
-        ("East_Asian_Width", "ea", lambda ch: unicodedata.east_asian_width(ch)),
+        ("General_Category", "gc"),
+        ("Bidi_Class", "bc"),
+        ("East_Asian_Width", "ea"),
     ]
     results = []
-    wanted = args.property
 
-    for name, key, ask in scalar:
-        if wanted and name not in wanted:
+    for name, key in scalar:
+        if name not in asking:
             continue
         tally = Comparison(name)
         short_of = aliases.get(key, {})
+        theirs_of = expand(oracle[name])
         for low, high, value in dump_property(sweep, name):
             ours = short_of.get(value, value)
             for cp in range(low, high + 1):
-                if not comparable(cp):
-                    tally.incomparable += 1
+                if too_new(cp):
+                    tally.skip("newer than the oracle")
                     continue
-                theirs = ask(chr(cp))
-                if theirs == "":
-                    # unicodedata answers "" for a codepoint it has no data
-                    # for, which is not a disagreement about the value.
-                    tally.incomparable += 1
+                theirs = theirs_of[cp]
+                if theirs is None:
+                    # The oracle declined: unicodedata answers "" for a
+                    # codepoint it has no data for, which is not a disagreement
+                    # about the value.
+                    tally.skip("no oracle data")
                     continue
                 tally.check(cp, ours, theirs)
         results.append(tally)
 
-    if not wanted or "Canonical_Combining_Class" in (wanted or []):
+    if "Canonical_Combining_Class" in asking:
         tally = Comparison("Canonical_Combining_Class")
+        theirs_of = expand(oracle["Canonical_Combining_Class"])
         for low, high, value in dump_property(sweep, "Canonical_Combining_Class"):
             ours = int(value)
             for cp in range(low, high + 1):
-                if not comparable(cp):
-                    tally.incomparable += 1
+                if too_new(cp):
+                    tally.skip("newer than the oracle")
                     continue
-                tally.check(cp, ours, unicodedata.combining(chr(cp)))
+                tally.check(cp, ours, int(theirs_of[cp]))
         results.append(tally)
 
-    if not wanted or "Bidi_Mirrored" in (wanted or []):
+    if "Bidi_Mirrored" in asking:
         tally = Comparison("Bidi_Mirrored")
+        theirs_of = expand(oracle["Bidi_Mirrored"])
         for low, high, value in dump_property(sweep, "Bidi_Mirrored"):
             ours = value == "Yes"
             for cp in range(low, high + 1):
-                if not comparable(cp):
-                    tally.incomparable += 1
+                if too_new(cp):
+                    tally.skip("newer than the oracle")
                     continue
-                tally.check(cp, ours, bool(unicodedata.mirrored(chr(cp))))
+                tally.check(cp, ours, theirs_of[cp] == "Y")
         results.append(tally)
 
-    if not wanted or "Decomposition_Type" in (wanted or []):
+    if "Decomposition_Type" in asking:
         tally = Comparison("Decomposition_Type")
+        theirs_of = expand(oracle["Decomposition_Type"])
         for low, high, value in dump_property(sweep, "Decomposition_Type"):
             # The long name, lowercased: unicodedata returns the UCD's own tag
             # text - "noBreak", "compat", "super" - and the long alias is that
@@ -324,8 +463,8 @@ def main(argv):
             # "nobreak" and reported every decomposable character.
             ours = value.lower()
             for cp in range(low, high + 1):
-                if not comparable(cp):
-                    tally.incomparable += 1
+                if too_new(cp):
+                    tally.skip("newer than the oracle")
                     continue
                 if 0xAC00 <= cp <= 0xD7A3:
                     # A documented limitation of the oracle rather than a
@@ -334,56 +473,47 @@ def main(argv):
                     # decomposition is arithmetic and is recorded nowhere. The
                     # UCD's own DerivedDecompositionType.txt says Canonical for
                     # all 11,172 of them, which is what this library says.
-                    tally.incomparable += 1
+                    tally.skip("Hangul, decomposed arithmetically")
                     continue
-                text = unicodedata.decomposition(chr(cp))
-                if not text:
-                    theirs = "none"
-                elif text.startswith("<"):
-                    theirs = text[1:text.index(">")].lower()
-                else:
-                    # No tag means a canonical decomposition, and the long alias
-                    # of that value is "Canonical". The first version of this
-                    # said "can", the short alias, and reported all 13,233
-                    # canonically decomposable characters as disagreements -
-                    # which is what an oracle that is wrong looks like from the
-                    # outside, and is why the triage is in this file.
-                    theirs = "canonical"
-                tally.check(cp, ours, theirs)
+                # The driver does the mechanical half - reading the tag out of
+                # `<noBreak> 0020`, and answering "canonical" where there is no
+                # tag and "none" where there is no mapping. The first version of
+                # this compared against the short alias "can" and reported all
+                # 13,233 canonically decomposable characters as disagreements,
+                # which is what an oracle that is wrong looks like from the
+                # outside, and is why the triage is in this file.
+                tally.check(cp, ours, theirs_of[cp])
         results.append(tally)
 
-    if not wanted or "Numeric_Value" in (wanted or []):
+    if "Numeric_Value" in asking:
         tally = Comparison("Numeric_Value")
+        theirs_of = expand(oracle["Numeric_Value"])
         for low, high, value in dump_property(sweep, "Numeric_Value"):
             ours = None if value == "None" else Fraction(value)
             for cp in range(low, high + 1):
-                if not comparable(cp):
-                    tally.incomparable += 1
+                if too_new(cp):
+                    tally.skip("newer than the oracle")
                     continue
-                try:
-                    theirs = Fraction(unicodedata.numeric(chr(cp))).limit_denominator(
-                        1000000)
-                except ValueError:
-                    theirs = None
-                if ours is not None and theirs is not None:
-                    # Compared as rationals, not as floats: the UCD has 1/3,
-                    # and a float comparison of that is a coin toss.
-                    tally.check(cp, ours, Fraction(theirs))
-                else:
-                    tally.check(cp, ours, theirs)
+                # A declined answer here is a real one - "this character has no
+                # numeric value" - unlike Bidi_Class above, where it means the
+                # oracle's tables do not reach the codepoint. Compared as
+                # rationals and not as floats: the UCD has 1/3, and a float
+                # comparison of that is a coin toss.
+                text = theirs_of[cp]
+                theirs = None if text is None else Fraction(text)
+                tally.check(cp, ours, theirs)
         results.append(tally)
 
-    if not wanted or "Name" in (wanted or []):
+    if "Name" in asking:
         tally = Comparison("Name")
         ours_names = dump_names(names_binary)
+        theirs_of = expand(oracle["Name"])
         for cp in range(MAX_CODEPOINT + 1):
-            if not comparable(cp):
-                tally.incomparable += 1
+            if too_new(cp):
+                tally.skip("newer than the oracle")
                 continue
-            try:
-                theirs = unicodedata.name(chr(cp))
-            except ValueError:
-                theirs = None
+            # A declined answer is again a real one: the codepoint has no name.
+            theirs = theirs_of[cp]
             ours = ours_names.get(cp)
             if ours is None and theirs is None:
                 continue  # neither names it; nothing to compare
@@ -409,9 +539,11 @@ def main(argv):
             print()
             print("The oracle is on UCD %s and the library on %s, so these need "
                   "triage by hand: DerivedAge filters codepoints that are new "
-                  "and not property values that changed. Advisory, exit 0; run "
-                  "with --strict against an oracle on %s."
-                  % (unicodedata.unidata_version, version, version))
+                  "and not property values that changed. Advisory, exit 0; for "
+                  "an oracle on %s run"
+                  % (unidata, version, version))
+            print("  GHOTI_ORACLE_ALIAS=python=python-next make "
+                  "check-oracle-unicodedata-strict")
             return 0
         return 1
     return 0

@@ -773,8 +773,8 @@ Every gate here has been *observed to fail* before it is trusted, per `chron`
 ### 12.4 The oracles run in containers
 
 `notes/suite/CONTAINERS.md` §2 and §4 record the pattern, prototyped and
-measured on `regex`, and this library adopts it unchanged rather than
-inventing a second one: `tools/oracle/containers/IMAGES` pins every reference
+measured on `regex`; **this library is the first to land it**, and adopts it
+rather than inventing a second one: `tools/oracle/containers/IMAGES` pins every reference
 (stock images by digest, built-here images by every input they read plus a
 run-time version check); `tools/oracle/oracle_env.py` is the one place a
 reference is spelled; `tools/oracle/oracle_run.py` resolves the reference,
@@ -786,18 +786,58 @@ batch protocol, because a container costs 200 ms per gate and would be fatal
 per case. The conformance gates in `tests/conformance/` need no container:
 their files are committed (§5.1) and they run in `make test`.
 
+Three places this library departs from the prototype, each because the
+prototype's reason does not hold here:
+
+- **`ORACLE_REQUIRED` defaults to 1**, where the prototype defaults to 0. There
+  it had to, because its oracle gates run inside `make test` and a clone without
+  an engine still has to build. Neither gate here is in `TEST_GATES`, so the
+  only caller is someone who typed `check-oracle-*`, and the honest answer to
+  "your engine is missing" is an error rather than a skip.
+- **`check_pin()` asserts in container mode and reports in host mode.** The
+  prototype runs it in both, for a reason that is about images *built here*: two
+  builds of one Dockerfile are not two copies of one image, so the run-time
+  version check is the only guarantee they have. Every image named here is a
+  stock one pinned by digest, and asserting the pin in host mode would only make
+  host mode unreachable - this machine's CPython is 3.13 and no pin worth having
+  names 3.13. Host mode therefore prints `oracle(host, unpinned)`, which is the
+  claim it is entitled to.
+- **The provenance line names the pin that answered**, not the one the gate
+  asked for. Under `GHOTI_ORACLE_ALIAS=python=python-next` the prototype's line
+  reads `oracle(container): python Python 3.15.0rc2`: the version is right and
+  the name is the one a reader would grep for. It now reads `python-next as
+  python`.
+
 Two things are specific to Unicode oracles:
 
 - **An oracle's Unicode version is the pin that matters**, and it is rarely
   ours. CPython's `unicodedata` tracks the interpreter release (3.13 carries
   15.1, 3.14 carries 16.0); ICU tracks its own (ICU 78 carries 17.0). So an
-  oracle's `IMAGES` entry names its UCD version beside its own, and
-  `unicodedata_diff.py` **compares only codepoints whose `DerivedAge.txt` age
-  is at most the oracle's UCD version**, counting the rest as *not comparable*
-  in its output rather than as agreement. An oracle that carries this
-  library's exact UCD version - node 22's ICU 78.2 for segmentation, per the
-  `regex` prototype - is the one to prefer for that reason, and the comparison
-  is then total.
+  oracle's `IMAGES` entry names its UCD version **as the version field** - the
+  interpreter's own release is incidental and the UCD is the claim - and
+  `unicodedata_diff.py` **excludes the codepoints whose `DerivedAge.txt` age is
+  newer than the oracle's UCD version**, counting them as *not comparable* in
+  its output rather than as agreement, under the reason for the skip.
+
+  So `IMAGES` carries **two CPythons**: `python`, a released interpreter on UCD
+  16.0.0, and `python-next` on UCD **17.0.0**, an exact match for
+  `tools/ucd/UCD_VERSION`. `check-oracle-unicodedata` is advisory against the
+  first; `check-oracle-unicodedata-strict` is a gate that can fail against the
+  second, and the difference between the two is a reading of what the Consortium
+  changed. The rc is not the gating pin and becomes one when 3.15.0 releases.
+
+  **The filter excludes only what is newer, not everything unassigned**, and
+  getting that wrong is worth recording because it read as caution. The first
+  version also excluded every codepoint with no age at all - 814,664 of them,
+  73% of the codespace. Assignments are never withdrawn, so a codepoint
+  unassigned in 17.0.0 is unassigned in every earlier version and *both sides
+  have an answer for it*. Comparing them takes the strict run from 2.2 million
+  comparisons to 7,947,413 and puts the end of every trie run under the oracle's
+  eye, which is where a last range one codepoint too long would show. It also
+  bought a real reading: CPython 3.15 answers a *default* `Bidi_Class` for
+  unassigned codepoints where 3.14 answers nothing, so 814,730 default-range
+  derivations from `DerivedBidiClass.txt` are now differentially checked, and
+  they agree.
 
   **That filter is necessary and not sufficient, which only running it showed.**
   `DerivedAge` says when a codepoint was *added* and nothing about when its
@@ -806,7 +846,11 @@ Two things are specific to Unicode oracles:
   `W`, U+226D newly mirrored, U+5146's numeric value a million to a million
   million. A differential two releases behind cannot tell that from a defect,
   so `unicodedata_diff.py` is **advisory by default** and `--strict` is for an
-  oracle on our own version. It also reports four buckets rather than two -
+  oracle on our own version. Measured against the two pins: UCD 16.0.0 leaves 2
+  differences (U+0295 and U+5146, the two decisions that land in 17.0) and 6,153
+  "ours only"; UCD 17.0.0 leaves **none of either**, across 7,947,413
+  comparisons - which is what a matching pin buys, and it retires the whole
+  triage rather than shortening it. It also reports four buckets rather than two -
   agreed, differed, ours only, theirs only - because "ours only" is usually the
   oracle's limitation (it does not compute the Tangut names) and "theirs only"
   is the bucket that would most likely be ours.
@@ -1024,11 +1068,17 @@ the sweep sums against `regex`'s own `property.c`, and the pairwise Line_Break
 sweep against a pre-move `regex` build. Both are differentials against a
 library that has not migrated yet, so both belong to phase E rather than ahead
 of it; the pairwise sweep's own artifact is committed and waiting for them
-(`tests/data/break/linebreak-pairs.txt`). The ICU differential from C's gate
-column is also absent: it needs a container image, and the image pattern in
-`notes/suite/CONTAINERS.md` is another session's work in progress. The CPython
-differential that does exist is `tools/oracle/unicodedata_diff.py`, and §12.4
-records what it found.
+(`tests/data/break/linebreak-pairs.txt`).
+
+**The oracle containers are built** (§12.4): `tools/oracle/oracle_env.py`,
+`oracle_run.py`, `containers/IMAGES` and `unicodedata_ask.py`, with
+`make check-oracle-unicodedata` against a released CPython and
+`make check-oracle-unicodedata-strict` against one carrying this library's own
+UCD version, where 7,947,413 comparisons over all 1,114,112 codepoints leave no
+difference at all. The ICU differential from C's gate column is still absent and
+is now the only thing the image pattern was blocking: it wants a driver
+compiled *inside* its image, which is the `pcre2` shape in
+`notes/suite/CONTAINERS.md` §2.4 rather than the stock-image shape landed here.
 
 The suite-level `check-ucd-pins.sh` is built, in the workspace rather than
 here: three libraries pin a UCD version today and the point of the check is

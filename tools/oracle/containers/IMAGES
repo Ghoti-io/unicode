@@ -1,0 +1,36 @@
+# The oracle images, pinned by digest.
+#
+# One line per oracle: <name> <image-ref> <version> <what it answers>
+#
+# The ref carries a tag *and* a digest. The tag is for a human reading this
+# file; the digest is what runs. A tag can be moved under you and a digest
+# cannot, so a green run names a set of bytes rather than a set of names.
+#
+# The version field is checked at run time against what the reference says it
+# is, and for this library it names the **UCD version, not the interpreter's**.
+# That is the pin that decides what a comparison means: CPython's own release
+# number is incidental, and `unicodedata.unidata_version` is the reference.
+#
+# Raising a pin is deliberate. A new reference version is new answers, and new
+# answers that disagree are findings rather than regressions - see the triage
+# in unicodedata_diff.py's header, every line of which is a Consortium decision
+# rather than a defect.
+
+# The gating pin: a released interpreter. UCD 16.0.0 against these tables'
+# 17.0.0, so the differential is advisory here and its triage still applies -
+# though it is already two entries shorter than it was against the 15.1 that
+# this machine's python3 carries. U+1171E and U+226D agree with the library
+# under 16.0; U+0295 and U+5146 do not yet.
+python	docker.io/library/python:3.14-slim@sha256:7bf6c3111fe094f8ee1a1cbcdc63c4cfb345b0e3df42d5aa9a90b3b4b022ab6d	unicodedata 16.0.0	General_Category, Bidi_Class, East_Asian_Width, Canonical_Combining_Class, Bidi_Mirrored, Decomposition_Type, Numeric_Value, Name
+
+# A second CPython, not a replacement. This one carries UCD 17.0.0, an exact
+# match with tools/ucd/UCD_VERSION, which is what retires the not-comparable
+# category outright: the DerivedAge filter, the property-changed-since caveat
+# and the whole triage list exist only because the oracle is behind.
+#
+# It is a release candidate, which is why it is not the gating pin above - but
+# it is the pin `check-oracle-unicodedata-strict` uses, because a matching UCD
+# is the only configuration in which a disagreement is necessarily a defect.
+# When 3.15.0 is released this becomes the gating pin and the line above it
+# stays, for the reading between the two.
+python-next	docker.io/library/python:3.15-rc-slim@sha256:4c269ae51995d15c7115f3403bde620e5aa5387ca5b865e56a61a4a24c9ffb49	unicodedata 17.0.0	The same questions at this library's own UCD version

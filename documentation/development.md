@@ -25,7 +25,8 @@ tests/conformance/          The Unicode conformance files and their runners (fro
 tests/data/                 Fixtures, reached through GUNI_TEST_DATA
 tests/fuzz/                 libFuzzer harnesses and seed corpus (from phase A)
 tools/ucd/                  fetch.sh, gen_tables.py, gen_sweep.py, UCD_VERSION
-tools/oracle/               unicodedata_diff.py, the CPython differential
+tools/oracle/               The differentials, and how a reference is reached
+tools/oracle/containers/    IMAGES: every oracle pinned by digest
 tools/check-stamps.py       The flag-stamp gate
 ```
 
@@ -105,12 +106,42 @@ the defect, watch it fail, then commit it green.
 ## The differentials
 
 The conformance files are the authority and they run in `make test`. The
-differentials are second opinions, they can be absent, and a run without one
-says how many comparisons it could not make rather than nothing:
+differentials are second opinions and they need two things `make test` does not -
+a container engine and the fetched UCD - so they are targets of their own:
 
 ```bash
-tools/oracle/unicodedata_diff.py            # CPython's unicodedata
-tools/oracle/unicodedata_diff.py --strict   # for an oracle on our UCD version
+make check-oracle-unicodedata          # a released CPython, UCD 16.0: advisory
+make check-oracle-unicodedata-strict   # one on UCD 17.0: this one can fail
+make check-oracles                     # both
+```
+
+**The reference is pinned, and that is the whole point.** This differential used
+to `import unicodedata` in its own process, which meant "the reference" was
+whichever CPython ran it - and on this machine that is 3.13, two Unicode releases
+behind these tables. Every disagreement it reported was that skew. The reference
+is now `unicodedata_ask.py` run in an image pinned by digest in
+`tools/oracle/containers/IMAGES`, through the pattern `notes/suite/CONTAINERS.md`
+describes, and against a pin carrying UCD 17.0.0 there are **no differences at
+all** over 7,947,413 comparisons.
+
+Three rules the pattern is built on, and each has been observed to hold:
+
+- **No silent fallback.** `ORACLE_MODE` is `container` or `host`, never "try the
+  container and fall back". A gate whose reference is not the one it names is
+  worse than one that did not run, because it prints the same green line.
+- **Fail closed.** `ORACLE_REQUIRED=1` is the default here; an unreachable
+  reference is an error naming what is missing. A `command -v python3` guard
+  would ask whether something called python3 exists, which is not the question -
+  it always did exist here, carrying the wrong UCD.
+- **Say which instrument answered.** Every run prints
+  `oracle(container): python-next Python 3.15.0rc2, unicodedata 17.0.0` above its
+  numbers, naming the pin that actually answered rather than the one the gate
+  asked for.
+
+To ask the gating pin's questions of the other pin:
+
+```bash
+GHOTI_ORACLE_ALIAS=python=python-next make check-oracle-unicodedata
 ```
 
 It reads the library's answers out of the test binaries' dump modes -
@@ -120,11 +151,13 @@ library's answers as text and a test binary already links the library. Those
 same dump modes are how a failing sweep is localised, so they pay for
 themselves twice.
 
-**An oracle two Unicode versions behind disagrees for reasons that are not
-defects**, and the script's header records the triage of every difference it
-currently reports so that a reader does not re-derive it. Two of those
-differences were the script's own, which is the shape of the risk: an oracle
-that is wrong looks exactly like an implementation that is wrong.
+**An oracle behind the library's UCD version disagrees for reasons that are not
+defects**, and the script's header records the triage so that a reader does not
+re-derive it. Two of those differences were once the script's own, which is the
+shape of the risk: an oracle that is wrong looks exactly like an implementation
+that is wrong. That is also why the driver's frame carries a property name and
+an exact line count - a parent that loses sync with its oracle would otherwise
+score the engine's own banner as an answer.
 
 ## Fuzzing
 
