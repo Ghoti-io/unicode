@@ -1,10 +1,10 @@
 # The design of ghoti.io-unicode
 
-**Status:** phases A and B are built, and phase C's segmentation is -
-`core.h`, `utf.h`, `char.h`, `set.h`, `norm.h`, `bidi.h`, `break.h`, the
-generator, the exhaustive sweep, and the conformance gates for
-normalisation, bidi and all four segmentations. `case.h`, `script.h` and
-`name.h` are the rest of C. Everything after that is design. This page
+**Status:** phases A and B are built, and so is phase C but for the names -
+`core.h`, `utf.h`, `char.h`, `set.h`, `norm.h`, `bidi.h`, `break.h`,
+`case.h`, `script.h`, the generator, the exhaustive sweep, and the
+conformance gates for normalisation, bidi and all four segmentations.
+`name.h` (tier 1) is what is left of C; then the migrations, D to F. This page
 says what will exist and why, so that the code can be judged against it
 rather than the other way round. A change of mind lands here first, in the
 same commit as the code that needs it (`CONVENTIONS.md` §9), and §16 marks
@@ -550,8 +550,33 @@ properties; and the `SpecialCasing` **conditions**, which are the part every
 
 Fold orbits - every codepoint that folds to the same value, which is what a
 case-insensitive character class needs - are `guni_case_orbit()`, moved from
-`regex` with its `GRX_FoldKind` axis (simple, full, and the ECMAScript legacy
-rules stay behind in `regex` as a dialect concern).
+`regex` (the ECMAScript legacy rules stay behind in `regex` as a dialect
+concern).
+
+**How the case data is verified.** The UCD publishes no case test file, and the
+simple and unconditional full mappings are a function of the codepoint - so
+they are swept exhaustively against the independent parser instead, as eight
+more pseudo-properties in `tests/data/sweep/<version>.sums`:
+`Simple_Uppercase_Mapping`, `Simple_Lowercase_Mapping`,
+`Simple_Titlecase_Mapping`, `Simple_Case_Folding`, `Case_Folding`,
+`Uppercase_Mapping`, `Lowercase_Mapping`, `Titlecase_Mapping`. All 3,037 case
+rows, over all 1,114,112 codepoints. That leaves exactly the sixteen
+conditional lines of `SpecialCasing.txt`, whose answer depends on the text
+around the character and which therefore get sixteen hand-written cases, each
+transcribed from the file's own fields.
+
+Two things that exercise found on the way, both in the oracle rather than the
+library: a full mapping **defaults to the simple one** (`SpecialCasing.txt`
+lists only the characters whose full mapping differs, so an oracle starting
+from "no mapping" claims that "a" upper-cases to nothing), and an explicit
+mapping equal to the codepoint is the identity - U+01C5's titlecase field names
+itself, and the library cannot report that as anything but "no mapping".
+
+Title-casing is the one case function that depends on another module:
+`guni_to_title()` needs UAX #29's word boundaries, from `break.h`, because
+UAX #21 defines it as the first cased character of each word. It is also the
+one with a working-state bound, one byte per character, and it refuses text
+longer than that rather than allocating behind the caller's back.
 
 ---
 

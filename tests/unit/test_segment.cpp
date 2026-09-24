@@ -40,6 +40,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <map>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -530,6 +531,81 @@ TEST(Segment, IllFormedUtf8DoesNotStopTheRules) {
     EXPECT_LE(position, broken.size());
   }
   EXPECT_EQ(found.back(), broken.size());
+}
+
+
+TEST(Segment, RulesTheConformanceFilesDoNotReach) {
+  /* Three positions the four files leave uncovered, found by measuring rather
+   * than by reading: a conformance file is a sample of rule interactions, not
+   * an enumeration of them, and these are the ones its sample misses. */
+  const GUNI_BreakOptions line = options_for(GUNI_BREAK_LINE);
+  const GUNI_BreakOptions sentence = options_for(GUNI_BREAK_SENTENCE);
+
+  /* LB25's `(PO | PR) x OP IS? NU` with the optional IS present: "$(.5" must
+   * not break after the currency sign. The file has the form without the IS. */
+  const std::vector<uint32_t> money = {'$', '(', '.', '5'};
+  EXPECT_FALSE(guni_break_at_codepoints(&line, money.data(), money.size(), 1));
+
+  /* SB11 after a paragraph separator, which needs the separator to be the
+   * character the lookback lands on. */
+  const std::vector<uint32_t> paragraphs = {'A', '.', 0x2029, 'B'};
+  std::vector<size_t> found = boundaries(sentence, paragraphs);
+  EXPECT_EQ(found, std::vector<size_t>({0, 3, 4}))
+      << "the sentence ends after the separator, not before it";
+}
+
+/** A provider that reads past the end of its run, to check the accessor. */
+bool reads_past_end(void * ctx, const GUNI_BreakText * text, size_t start,
+    size_t end, size_t position) {
+  (void)start;
+  (void)position;
+  bool * saw_end = static_cast<bool *>(ctx);
+  uint32_t codepoint = 0;
+  /* At the end of the *text* the accessor says no, which is how a provider
+   * knows to stop without being told the length separately. */
+  if (!guni_break_text_at(text, guni_break_text_length(text), &codepoint,
+          nullptr)) {
+    *saw_end = true;
+  }
+  (void)end;
+  return false;
+}
+
+TEST(Segment, ProvidersCanReadToTheEndOfTheText) {
+  bool saw_end = false;
+  GUNI_BreakProvider provider;
+  provider.ctx = &saw_end;
+  provider.sa_break_at = &reads_past_end;
+  const GUNI_BreakOptions options = options_for(GUNI_BREAK_LINE,
+      GUNI_LINE_BREAK_STRICT, &provider);
+  const std::vector<uint32_t> thai = {0x0E01, 0x0E02, 0x0E03};
+  boundaries(options, thai);
+  EXPECT_TRUE(saw_end);
+}
+
+TEST(Segment, AnSaRunBeginningAfterOtherTextIsStillARun) {
+  /* The provider is consulted only strictly inside a run of SA characters, so
+   * the position where the run *starts* - with a non-SA character before it -
+   * has to be recognised as not being inside one. */
+  /* The positions asked about, as a set: boundaries() walks the text twice -
+   * once to count and once to fill - so counting calls would be counting the
+   * walks. */
+  std::set<size_t> asked;
+  GUNI_BreakProvider provider;
+  provider.ctx = &asked;
+  provider.sa_break_at = [](void * ctx, const GUNI_BreakText *, size_t,
+                            size_t, size_t position) {
+    static_cast<std::set<size_t> *>(ctx)->insert(position);
+    return true;
+  };
+  const GUNI_BreakOptions options = options_for(GUNI_BREAK_LINE,
+      GUNI_LINE_BREAK_STRICT, &provider);
+  const std::vector<uint32_t> mixed = {'a', 0x0E01, 0x0E02, 0x0E03};
+  std::vector<size_t> found = boundaries(options, mixed);
+  /* Position 1 is not inside the run - the character before it is Latin - so
+   * the provider is not asked there; positions 2 and 3 are. */
+  EXPECT_EQ(asked, std::set<size_t>({2, 3}));
+  EXPECT_EQ(found, std::vector<size_t>({2, 3, 4}));
 }
 
 } // namespace

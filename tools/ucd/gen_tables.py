@@ -584,6 +584,7 @@ class Ucd:
         self.binary_names.extend(DERIVED_BINARY)
 
         self.decomposition = self.load_decompositions()
+        self.case = self.load_case()
         self.mirroring = self.load_mirroring()
         self.brackets = self.load_brackets()
         self.scx = self.load_script_extensions()
@@ -663,6 +664,83 @@ class Ucd:
                 continue
             pairs[(seq[0], seq[1])] = cp
         return {"nfd": nfd, "nfkd": nfkd, "pairs": pairs, "tag": compat_tag}
+
+    def load_case(self):
+        """Simple mappings, full mappings, the conditions, and the fold orbits.
+
+        Four files' worth of one subject. The simple mappings are three fields
+        of UnicodeData.txt; the folds are CaseFolding.txt's C, F, S and T
+        statuses; the full mappings and every condition are SpecialCasing.txt.
+        The conditions are the part every toupper() gets wrong (design.md
+        section 2, M13) and there are only sixteen lines of them, which is why
+        they are a table here and rules in case.c rather than anything cleverer.
+        """
+        simple = {}
+        for fields in read_records(self.path("UnicodeData.txt")):
+            if len(fields) < 15:
+                continue
+            cp = int(fields[0], 16)
+            upper = int(fields[12], 16) if fields[12] else 0
+            lower = int(fields[13], 16) if fields[13] else 0
+            title = int(fields[14], 16) if fields[14] else 0
+            if upper or lower or title:
+                simple[cp] = {"upper": upper, "lower": lower, "title": title}
+
+        folds = {}
+        full_folds = {}
+        turkic_folds = {}
+        for fields in read_records(self.path("CaseFolding.txt")):
+            if len(fields) < 3:
+                continue
+            cp = int(fields[0], 16)
+            status = fields[1]
+            mapping = [int(part, 16) for part in fields[2].split()]
+            if status == "C":
+                folds[cp] = mapping[0]
+                if len(mapping) != 1:
+                    raise SystemExit("common fold of U+%04X is not one codepoint" % cp)
+            elif status == "S":
+                folds[cp] = mapping[0]
+            elif status == "F":
+                full_folds[cp] = mapping
+            elif status == "T":
+                turkic_folds[cp] = mapping
+
+        full = {}       # cp -> {upper, lower, title} as sequences
+        conditional = []  # (cp, language, condition, upper, lower, title)
+        for line in open(self.path("SpecialCasing.txt"), encoding="utf-8"):
+            body = line.split("#", 1)[0].strip()
+            if not body:
+                continue
+            fields = [field.strip() for field in body.split(";")]
+            if len(fields) < 4:
+                continue
+            cp = int(fields[0], 16)
+            lower = [int(part, 16) for part in fields[1].split()]
+            title = [int(part, 16) for part in fields[2].split()]
+            upper = [int(part, 16) for part in fields[3].split()]
+            condition = fields[4] if len(fields) > 4 and fields[4] else ""
+            if condition:
+                words = condition.split()
+                language = words[0] if words[0] in ("lt", "tr", "az") else ""
+                rule = " ".join(words[1:] if language else words)
+                conditional.append((cp, language, rule, upper, lower, title))
+            else:
+                full[cp] = {"upper": upper, "lower": lower, "title": title}
+
+        # The fold orbits: every codepoint that folds to the same value, which
+        # is what a case-insensitive character class needs. The value itself is
+        # a member of its own orbit when it folds to itself.
+        orbit_of = {}
+        for cp in range(NUM_CODEPOINTS):
+            value = folds.get(cp, cp)
+            orbit_of.setdefault(value, set()).add(cp)
+            orbit_of[value].add(value)
+        orbits = {value: sorted(members) for value, members in orbit_of.items()
+                  if len(members) > 1}
+        return {"simple": simple, "folds": folds, "full_folds": full_folds,
+                "turkic_folds": turkic_folds, "full": full,
+                "conditional": conditional, "orbits": orbits}
 
     def load_mirroring(self):
         """Bidi_Mirroring_Glyph: what UAX #9's rule L4 substitutes."""
@@ -753,6 +831,8 @@ class Tables:
         self.build_trie()
         self.build_runs()
         self.build_decompositions()
+        self.build_case()
+        self.build_script_runs()
 
     # -- enums -------------------------------------------------------------
 
@@ -919,6 +999,158 @@ class Tables:
         witness = max(data["nfkd"], key=lambda cp: len(data["nfkd"][cp]))
         self.max_expansion_witness = witness
 
+    # -- case --------------------------------------------------------------
+
+    def build_case(self):
+        """One sorted table over every codepoint with any case data.
+
+        Gated at run time by Changes_When_Casemapped or
+        Changes_When_Casefolded, which are bits of the property record, so a
+        codepoint with no case data costs one trie lookup and no search.
+        """
+        case = self.ucd.case
+        pool = []
+        offsets = {}
+
+        def intern(sequence):
+            key = tuple(sequence)
+            if not key:
+                return (0, 0)
+            if key not in offsets:
+                offsets[key] = len(pool)
+                pool.extend(key)
+            return (offsets[key], len(key))
+
+        codepoints = sorted(set(case["simple"]) | set(case["folds"])
+                            | set(case["full"]) | set(case["full_folds"]))
+        rows = []
+        for cp in codepoints:
+            simple = case["simple"].get(cp, {})
+            full = case["full"].get(cp, {})
+            simple_values = [
+                simple.get("upper", 0), simple.get("lower", 0),
+                simple.get("title", 0), case["folds"].get(cp, 0)]
+            full_values = [
+                intern(full.get("upper", [])), intern(full.get("lower", [])),
+                intern(full.get("title", [])),
+                intern(case["full_folds"].get(cp, []))]
+            rows.append((cp, simple_values, full_values))
+        self.case_rows = rows
+
+        conditional = []
+        for cp, language, condition, upper, lower, title in case["conditional"]:
+            if condition not in CASE_CONDITIONS:
+                raise SystemExit(
+                    "SpecialCasing.txt condition %r is not one case.c knows. "
+                    "Add it to CASE_CONDITIONS here and to the switch in "
+                    "case.c; a dropped condition is a case mapping that is "
+                    "wrong in one language and right everywhere else."
+                    % condition)
+            if language not in CASE_LANGUAGES:
+                raise SystemExit("unknown SpecialCasing language %r" % language)
+            conditional.append((cp, CASE_LANGUAGES[language],
+                                CASE_CONDITIONS[condition], intern(upper),
+                                intern(lower), intern(title)))
+        self.case_conditional = conditional
+
+        self.turkic_folds = sorted(
+            (cp, mapping[0]) for cp, mapping in case["turkic_folds"].items()
+            if len(mapping) == 1)
+        if len(self.turkic_folds) != len(case["turkic_folds"]):
+            raise SystemExit("a Turkic fold is more than one codepoint")
+
+        orbit_pool = []
+        orbit_rows = []
+        for value in sorted(case["orbits"]):
+            members = case["orbits"][value]
+            orbit_rows.append((value, len(orbit_pool), len(members)))
+            orbit_pool.extend(members)
+        self.orbit_rows = orbit_rows
+        self.orbit_pool = orbit_pool
+
+        widest = 1
+        for cp, _simple, full in rows:
+            for _offset, length in full:
+                widest = max(widest, length)
+        for entry in conditional:
+            for _offset, length in entry[3:]:
+                widest = max(widest, length)
+        self.case_max_expansion = widest
+        if len(pool) > 0xFFFF or len(orbit_pool) > 0xFFFF:
+            raise SystemExit("a case pool exceeds a uint16 offset")
+        self.case_pool = pool
+
+    # -- script runs -------------------------------------------------------
+
+    def build_script_runs(self):
+        """One augmented bitset per distinct Script_Extensions set.
+
+        Indexed by the set's offset in the Script_Extensions pool, which is
+        already a field of the property record - so a script-run check is the
+        record lookup it was going to do anyway plus one array index, with no
+        second search.
+        """
+        script = self.ucd.property("sc")
+        total = script.values and max(script.values.values()) + 1
+        virtual_base = total
+        bits = virtual_base + len(VIRTUAL_SCRIPTS)
+        words = (bits + 63) // 64
+        self.script_run_words = words
+        self.script_run_bits = bits
+
+        sets = []
+        index_of = {}
+        by_offset = [0] * len(self.scx_pool)
+        for names, offset in self.scx_offsets.items():
+            members = set(names)
+            for name in names:
+                for extra in SCRIPT_AUGMENTATIONS.get(name, ()):
+                    members.add(extra)
+            mask = [0] * words
+            for name in sorted(members):
+                if name in VIRTUAL_SCRIPTS:
+                    bit = virtual_base + VIRTUAL_SCRIPTS.index(name)
+                else:
+                    bit = script.values[name]
+                mask[bit // 64] |= 1 << (bit % 64)
+            key = tuple(mask)
+            if key not in index_of:
+                index_of[key] = len(sets)
+                sets.append(mask)
+            by_offset[offset] = index_of[key]
+        self.script_run_sets = sets
+        self.script_run_by_offset = by_offset
+
+        # The decimal-digit blocks: each is ten consecutive codepoints, which
+        # the UCD has always arranged and which is asserted rather than assumed
+        # - a version that stopped doing it would otherwise produce a table
+        # that mis-groups digits silently.
+        gc = self.ucd.property("gc").table
+        zeros = []
+        cp = 0
+        while cp <= MAX_CODEPOINT:
+            if gc[cp] != "Decimal_Number":
+                cp += 1
+                continue
+            numeric = None
+            for first, last, numerator, denominator in self.ucd.numeric:
+                if first <= cp <= last:
+                    numeric = (numerator, denominator)
+                    break
+            if numeric != (0, 1):
+                cp += 1
+                continue
+            for offset in range(10):
+                if cp + offset > MAX_CODEPOINT \
+                        or gc[cp + offset] != "Decimal_Number":
+                    raise SystemExit(
+                        "the decimal digits at U+%04X are not ten consecutive "
+                        "Nd codepoints; the script-run digit rule assumes they "
+                        "are" % cp)
+            zeros.append(cp)
+            cp += 10
+        self.digit_zeros = zeros
+
     # -- runs --------------------------------------------------------------
 
     def build_runs(self):
@@ -942,6 +1174,49 @@ class Tables:
 # is got at, and the generic extractor in set.c switches on the kind rather
 # than on the property. Adding a property does not touch that switch.
 # ---------------------------------------------------------------------------
+
+# UTS #39 section 5.1's augmentation, which makes a three-way script mix fall
+# out of an ordinary set intersection.
+#
+# Han is written alongside Hiragana and Katakana in Japanese, alongside Hangul
+# in Korean, and alongside Bopomofo in Taiwanese Mandarin - but a string mixing
+# Hangul, Bopomofo and Han is none of the three. Adding Han to Hiragana's set
+# and Hiragana to Han's would make that string a run, because each pair would
+# intersect. UTS #39 instead invents three scripts that the participating
+# characters all name, so the three-way case needs no rule of its own.
+#
+# They are not UCD script values and are deliberately not members of
+# GUNI_Script: they live only in the script-run bitsets, as the three bits
+# above the real scripts.
+SCRIPT_AUGMENTATIONS = {
+    "Han": ("Japanese", "Korean", "HanBopomofo"),
+    "Hiragana": ("Japanese",),
+    "Katakana": ("Japanese",),
+    "Hangul": ("Korean",),
+    "Bopomofo": ("HanBopomofo",),
+}
+
+VIRTUAL_SCRIPTS = ("Japanese", "Korean", "HanBopomofo")
+
+# SpecialCasing.txt's conditions, which case.c implements. A condition the
+# UCD adds and this list does not know stops the generator: silently dropping
+# one would be a case mapping that is wrong in one language and right
+# everywhere else, which is the hardest kind of defect to notice.
+CASE_CONDITIONS = {
+    "": "GUNI_CASE_COND_NONE",
+    "Final_Sigma": "GUNI_CASE_COND_FINAL_SIGMA",
+    "After_Soft_Dotted": "GUNI_CASE_COND_AFTER_SOFT_DOTTED",
+    "More_Above": "GUNI_CASE_COND_MORE_ABOVE",
+    "After_I": "GUNI_CASE_COND_AFTER_I",
+    "Not_Before_Dot": "GUNI_CASE_COND_NOT_BEFORE_DOT",
+}
+
+CASE_LANGUAGES = {
+    "": "GUNI_LANG_NONE",
+    "tr": "GUNI_LANG_TURKIC",
+    "az": "GUNI_LANG_TURKIC",
+    "lt": "GUNI_LANG_LITHUANIAN",
+}
 
 KIND_ENUM = "GUNI_PROP_KIND_ENUM"
 KIND_BINARY = "GUNI_PROP_KIND_BINARY"
@@ -1234,6 +1509,22 @@ extern "C" {
         for form in ("NFD", "NFC", "NFKD", "NFKC"):
             out.write("#define GUNI_NORM_MAX_EXPANSION_%s %d\n"
                       % (form, tables.max_expansion[form]))
+        out.write("\n/**\n * @brief Words of bitset in a script-run check.\n *\n"
+                  " * One bit per script, plus three for UTS #39 section 5.1's\n"
+                  " * augmented scripts - Japanese, Korean and HanBopomofo - which are\n"
+                  " * not Unicode script values and exist only so that a three-way mix\n"
+                  " * of Han, Hangul and Bopomofo falls out of an ordinary set\n"
+                  " * intersection. Generated, because it follows from how many scripts\n"
+                  " * there are.\n */\n")
+        out.write("#define GUNI_SCRIPT_RUN_WORDS %d\n" % tables.script_run_words)
+
+        out.write("\n/**\n * @brief The most codepoints one codepoint becomes "
+                  "under a full case mapping.\n *\n"
+                  " * Generated from SpecialCasing.txt and CaseFolding.txt, not "
+                  "stated: a\n * caller sizes a buffer as `length * "
+                  "GUNI_CASE_MAX_EXPANSION` and needs no\n * preflight.\n */\n")
+        out.write("#define GUNI_CASE_MAX_EXPANSION %d\n"
+                  % tables.case_max_expansion)
 
         gc = tables.numbering["GUNI_GeneralCategory"]
         out.write("\n/**\n * @brief The single-letter General_Category groups, as masks.\n"
@@ -1249,6 +1540,19 @@ extern "C" {
                 long_name = ucd.canonicalise("gc", short)
                 parts.append("GUNI_GC_MASK(%s)" % gc.member(long_name))
             out.write("#define GUNI_GC_MASK_%s (%s)\n" % (group, " | ".join(parts)))
+
+        out.write("\n/**\n * @brief The language-sensitive case rules "
+                  "SpecialCasing.txt defines.\n *\n"
+                  " * Not a locale: an argument. setlocale() is process-wide state that\n"
+                  " * changes how a library behaves (design.md section 2, M7), and the\n"
+                  " * Turkish dotless i is the case where that state silently corrupts\n"
+                  " * data. Generated, because the languages are the UCD's: a new one\n"
+                  " * appends a member here rather than needing a hand-edit.\n */\n")
+        out.write("typedef enum {\n"
+                  "  GUNI_LANG_NONE = 0,   ///< The language-neutral mappings.\n"
+                  "  GUNI_LANG_TURKIC = 1, ///< Turkish and Azerbaijani: the dotless i.\n"
+                  "  GUNI_LANG_LITHUANIAN = 2 ///< Lithuanian: the retained dot above.\n"
+                  "} GUNI_CaseTailoring;\n")
 
         out.write("\n/**\n * @brief UAX #15's quick-check answer.\n *\n"
                   " * MAYBE means the full algorithm has to run; it is never a guess.\n */\n")
@@ -1361,6 +1665,23 @@ def emit_tables_header(ucd, tables, entries, out_dir):
         out.write("#define GUNI_DECOMP_COUNT %d\n" % len(tables.decomp_rows))
         out.write("#define GUNI_DECOMP_POOL_COUNT %d\n" % len(tables.decomp_pool))
         out.write("#define GUNI_COMPOSE_COUNT %d\n" % len(tables.compose))
+        out.write("/* UTS #39 script runs. GUNI_SCRIPT_RUN_WORDS is in enums.h:\n"
+                  " * GUNI_ScriptRun holds the bitset, so its width is public. */\n")
+        out.write("#define GUNI_SCRIPT_RUN_SET_COUNT %d\n"
+                  % len(tables.script_run_sets))
+        out.write("#define GUNI_DIGIT_ZERO_COUNT %d\n" % len(tables.digit_zeros))
+        out.write("#define GUNI_CASE_COUNT %d\n" % len(tables.case_rows))
+        out.write("#define GUNI_CASE_POOL_COUNT %d\n" % len(tables.case_pool))
+        out.write("#define GUNI_CASE_CONDITIONAL_COUNT %d\n"
+                  % len(tables.case_conditional))
+        out.write("#define GUNI_TURKIC_FOLD_COUNT %d\n" % len(tables.turkic_folds))
+        out.write("#define GUNI_ORBIT_COUNT %d\n" % len(tables.orbit_rows))
+        out.write("#define GUNI_ORBIT_POOL_COUNT %d\n" % len(tables.orbit_pool))
+        out.write("/* The four columns of every case table, in this order. */\n")
+        out.write("#define GUNI_CASE_UPPER 0\n")
+        out.write("#define GUNI_CASE_LOWER 1\n")
+        out.write("#define GUNI_CASE_TITLE 2\n")
+        out.write("#define GUNI_CASE_FOLD 3\n")
         out.write("#define GUNI_MIRROR_COUNT %d\n" % len(ucd.mirroring))
         out.write("#define GUNI_BRACKET_COUNT %d\n" % len(ucd.brackets))
         out.write("/* A composition key: the two codepoints, 21 bits each. */\n")
@@ -1417,6 +1738,59 @@ extern const uint8_t guni_decomp_nfkd_length[GUNI_DECOMP_COUNT];
  * two codepoints whose codepoint is not Full_Composition_Exclusion. */
 extern const uint64_t guni_compose_key[GUNI_COMPOSE_COUNT];
 extern const uint32_t guni_compose_value[GUNI_COMPOSE_COUNT];
+
+/* UTS #39 script runs. One augmented bitset per distinct Script_Extensions
+ * set, indexed by that set's offset in guni_scx_pool - which is a field of the
+ * property record, so a check costs no second search. */
+extern const uint64_t
+    guni_script_run_sets[GUNI_SCRIPT_RUN_SET_COUNT][GUNI_SCRIPT_RUN_WORDS];
+extern const uint16_t guni_script_run_by_offset[GUNI_SCX_POOL_COUNT];
+
+/* The first codepoint of each block of ten decimal digits. */
+extern const uint32_t guni_digit_zeros[GUNI_DIGIT_ZERO_COUNT];
+
+/* Case mappings. One sorted table over every codepoint with any, gated by
+ * Changes_When_Casemapped and Changes_When_Casefolded in the property record,
+ * so a codepoint with none costs no search. A simple mapping of 0 means the
+ * identity: 0 is not a mapping target, so it is unambiguous. */
+extern const uint32_t guni_case_codepoint[GUNI_CASE_COUNT];
+extern const uint32_t guni_case_simple[GUNI_CASE_COUNT][4];
+extern const uint16_t guni_case_full_offset[GUNI_CASE_COUNT][4];
+extern const uint8_t guni_case_full_length[GUNI_CASE_COUNT][4];
+extern const uint32_t guni_case_pool[GUNI_CASE_POOL_COUNT];
+
+/** SpecialCasing.txt's conditions, which case.c implements one by one. */
+typedef enum {
+  GUNI_CASE_COND_NONE = 0,
+  GUNI_CASE_COND_FINAL_SIGMA,
+  GUNI_CASE_COND_AFTER_SOFT_DOTTED,
+  GUNI_CASE_COND_MORE_ABOVE,
+  GUNI_CASE_COND_AFTER_I,
+  GUNI_CASE_COND_NOT_BEFORE_DOT
+} GuniCaseCondition;
+
+/** One conditional mapping: sixteen lines of SpecialCasing.txt. */
+typedef struct {
+  uint32_t codepoint;
+  uint8_t language;  ///< A GUNI_CaseTailoring.
+  uint8_t condition; ///< A GuniCaseCondition.
+  uint16_t offset[4];
+  uint8_t length[4];
+} GuniCaseConditional;
+
+extern const GuniCaseConditional
+    guni_case_conditional[GUNI_CASE_CONDITIONAL_COUNT];
+
+/* CaseFolding.txt's T status: the two codepoints a Turkic fold differs on. */
+extern const uint32_t guni_turkic_fold_from[GUNI_TURKIC_FOLD_COUNT];
+extern const uint32_t guni_turkic_fold_to[GUNI_TURKIC_FOLD_COUNT];
+
+/* The fold orbits: every codepoint that folds to the same value, keyed by
+ * that value. What a case-insensitive character class needs. */
+extern const uint32_t guni_orbit_value[GUNI_ORBIT_COUNT];
+extern const uint16_t guni_orbit_offset[GUNI_ORBIT_COUNT];
+extern const uint8_t guni_orbit_length[GUNI_ORBIT_COUNT];
+extern const uint32_t guni_orbit_pool[GUNI_ORBIT_POOL_COUNT];
 
 /* UAX #9's rule L4: the mirrored glyph, and BD14/BD15's bracket pairs for
  * rule N0. Sorted by codepoint; both are small enough that a binary search is
@@ -1624,13 +1998,13 @@ def emit_misc_data(ucd, tables, out_dir):
 
 
 def emit_norm_data(ucd, tables, out_dir):
-    with open_out(out_dir, "src/char/tables/norm_data.c") as out:
+    with open_out(out_dir, "src/norm/tables/norm_data.c") as out:
         out.write(LICENSE_NOTICE)
         out.write("\n")
         out.write(generated_notice(ucd.version,
                                   "UnicodeData.txt field 5 and "
                                   "DerivedNormalizationProps.txt"))
-        out.write("\n#include \"tables.h\"\n")
+        out.write("\n#include \"../../char/tables/tables.h\"\n")
         out.write("\n/* Every decomposition, fully expanded at generation time so that the\n"
                   " * library never recurses. Shared where a codepoint's canonical and\n"
                   " * compatibility decompositions are the same sequence. */\n")
@@ -1653,6 +2027,112 @@ def emit_norm_data(ucd, tables, out_dir):
         out.write("\nconst uint8_t guni_decomp_nfkd_length[GUNI_DECOMP_COUNT] = {\n")
         emit_array(out, [row[4] for row in tables.decomp_rows], 20)
         out.write("};\n")
+        out.write("\n/* The pairs that compose, by packed key. */\n")
+        out.write("const uint64_t guni_compose_key[GUNI_COMPOSE_COUNT] = {\n")
+        emit_array(out, tables.compose, 4,
+                   lambda row: "GUNI_COMPOSE_KEY(0x%06Xu, 0x%06Xu)" % (row[0], row[1]))
+        out.write("};\n")
+        out.write("\nconst uint32_t guni_compose_value[GUNI_COMPOSE_COUNT] = {\n")
+        emit_array(out, tables.compose, 8, lambda row: "0x%06Xu" % row[2])
+        out.write("};\n")
+
+
+def emit_case_data(ucd, tables, out_dir):
+    with open_out(out_dir, "src/case/tables/case_data.c") as out:
+        out.write(LICENSE_NOTICE)
+        out.write("\n")
+        out.write(generated_notice(ucd.version, "UnicodeData.txt, SpecialCasing.txt and CaseFolding.txt"))
+        out.write("\n#include \"../../char/tables/tables.h\"\n")
+        out.write("\n/* Every codepoint with a case mapping, sorted. */\n")
+        out.write("const uint32_t guni_case_codepoint[GUNI_CASE_COUNT] = {\n")
+        emit_array(out, [row[0] for row in tables.case_rows], 8,
+                   lambda v: "0x%06Xu" % v)
+        out.write("};\n")
+        out.write("\n/* Simple mappings: upper, lower, title, fold. 0 is the "
+                  "identity. */\n")
+        out.write("const uint32_t guni_case_simple[GUNI_CASE_COUNT][4] = {\n")
+        for _cp, simple, _full in tables.case_rows:
+            out.write("  {%s},\n" % ", ".join("0x%06Xu" % v for v in simple))
+        out.write("};\n")
+        out.write("\n/* Full mappings, into guni_case_pool. Length 0 means the "
+                  "simple mapping stands. */\n")
+        out.write("const uint16_t guni_case_full_offset[GUNI_CASE_COUNT][4] = {\n")
+        for _cp, _simple, full in tables.case_rows:
+            out.write("  {%s},\n" % ", ".join(str(offset) for offset, _l in full))
+        out.write("};\n")
+        out.write("\nconst uint8_t guni_case_full_length[GUNI_CASE_COUNT][4] = {\n")
+        for _cp, _simple, full in tables.case_rows:
+            out.write("  {%s},\n" % ", ".join(str(length) for _o, length in full))
+        out.write("};\n")
+        out.write("\nconst uint32_t guni_case_pool[GUNI_CASE_POOL_COUNT] = {\n")
+        emit_array(out, tables.case_pool, 8, lambda v: "0x%06Xu" % v)
+        out.write("};\n")
+        out.write("\n/* The sixteen conditional lines of SpecialCasing.txt. */\n")
+        out.write("const GuniCaseConditional\n"
+                  "    guni_case_conditional[GUNI_CASE_CONDITIONAL_COUNT] = {\n")
+        for cp, language, condition, upper, lower, title in tables.case_conditional:
+            out.write("  {0x%06Xu, %s, %s, {%d, %d, %d, 0}, {%d, %d, %d, 0}},\n"
+                      % (cp, language, condition, upper[0], lower[0], title[0],
+                         upper[1], lower[1], title[1]))
+        out.write("};\n")
+        out.write("\nconst uint32_t guni_turkic_fold_from[GUNI_TURKIC_FOLD_COUNT] = {\n")
+        emit_array(out, [cp for cp, _to in tables.turkic_folds], 8,
+                   lambda v: "0x%06Xu" % v)
+        out.write("};\n")
+        out.write("\nconst uint32_t guni_turkic_fold_to[GUNI_TURKIC_FOLD_COUNT] = {\n")
+        emit_array(out, [to for _cp, to in tables.turkic_folds], 8,
+                   lambda v: "0x%06Xu" % v)
+        out.write("};\n")
+        out.write("\n/* The fold orbits, keyed by the value folded to. */\n")
+        out.write("const uint32_t guni_orbit_value[GUNI_ORBIT_COUNT] = {\n")
+        emit_array(out, [row[0] for row in tables.orbit_rows], 8,
+                   lambda v: "0x%06Xu" % v)
+        out.write("};\n")
+        out.write("\nconst uint16_t guni_orbit_offset[GUNI_ORBIT_COUNT] = {\n")
+        emit_array(out, [row[1] for row in tables.orbit_rows], 12)
+        out.write("};\n")
+        out.write("\nconst uint8_t guni_orbit_length[GUNI_ORBIT_COUNT] = {\n")
+        emit_array(out, [row[2] for row in tables.orbit_rows], 20)
+        out.write("};\n")
+        out.write("\nconst uint32_t guni_orbit_pool[GUNI_ORBIT_POOL_COUNT] = {\n")
+        emit_array(out, tables.orbit_pool, 8, lambda v: "0x%06Xu" % v)
+        out.write("};\n")
+
+
+
+def emit_script_data(ucd, tables, out_dir):
+    with open_out(out_dir, "src/script/tables/script_data.c") as out:
+        out.write(LICENSE_NOTICE)
+        out.write("\n")
+        out.write(generated_notice(ucd.version, "ScriptExtensions.txt and DerivedGeneralCategory.txt"))
+        out.write("\n#include \"../../char/tables/tables.h\"\n")
+        out.write("\n/* The augmented script sets, by Script_Extensions pool "
+                  "offset. */\n")
+        out.write("const uint64_t\n"
+                  "    guni_script_run_sets[GUNI_SCRIPT_RUN_SET_COUNT]"
+                  "[GUNI_SCRIPT_RUN_WORDS] = {\n")
+        for mask in tables.script_run_sets:
+            out.write("  {%s},\n"
+                      % ", ".join("UINT64_C(0x%016X)" % word for word in mask))
+        out.write("};\n")
+        out.write("\nconst uint16_t guni_script_run_by_offset"
+                  "[GUNI_SCX_POOL_COUNT] = {\n")
+        emit_array(out, tables.script_run_by_offset, 16)
+        out.write("};\n")
+        out.write("\n/* The first codepoint of each block of ten decimal "
+                  "digits. */\n")
+        out.write("const uint32_t guni_digit_zeros[GUNI_DIGIT_ZERO_COUNT] = {\n")
+        emit_array(out, tables.digit_zeros, 8, lambda v: "0x%06Xu" % v)
+        out.write("};\n")
+
+
+
+def emit_bidi_data(ucd, tables, out_dir):
+    with open_out(out_dir, "src/bidi/tables/bidi_data.c") as out:
+        out.write(LICENSE_NOTICE)
+        out.write("\n")
+        out.write(generated_notice(ucd.version, "BidiMirroring.txt and BidiBrackets.txt"))
+        out.write("\n#include \"../../char/tables/tables.h\"\n")
         mirroring = sorted(ucd.mirroring.items())
         out.write("\n/* Bidi_Mirroring_Glyph, for rule L4. */\n")
         out.write("const uint32_t guni_mirror_from[GUNI_MIRROR_COUNT] = {\n")
@@ -1674,14 +2154,6 @@ def emit_norm_data(ucd, tables, out_dir):
         emit_array(out, [1 if pair[1] == "o" else 2 for _cp, pair in brackets], 20)
         out.write("};\n")
 
-        out.write("\n/* The pairs that compose, by packed key. */\n")
-        out.write("const uint64_t guni_compose_key[GUNI_COMPOSE_COUNT] = {\n")
-        emit_array(out, tables.compose, 4,
-                   lambda row: "GUNI_COMPOSE_KEY(0x%06Xu, 0x%06Xu)" % (row[0], row[1]))
-        out.write("};\n")
-        out.write("\nconst uint32_t guni_compose_value[GUNI_COMPOSE_COUNT] = {\n")
-        emit_array(out, tables.compose, 8, lambda row: "0x%06Xu" % row[2])
-        out.write("};\n")
 
 
 def emit_names_data(ucd, tables, entries, out_dir):
@@ -1776,17 +2248,22 @@ def main(argv):
     emit_props_data(ucd, tables, entries, args.out)
     emit_misc_data(ucd, tables, args.out)
     emit_norm_data(ucd, tables, args.out)
+    emit_case_data(ucd, tables, args.out)
+    emit_script_data(ucd, tables, args.out)
+    emit_bidi_data(ucd, tables, args.out)
     emit_names_data(ucd, tables, entries, args.out)
 
     sys.stderr.write(
         "%d distinct records, %d stage-2 blocks, %d runs, %d scx words, "
         "%d properties, %d value spellings, %d decompositions in %d words, "
-        "%d composition pairs, %d mirrors, %d brackets\n"
+        "%d composition pairs, %d mirrors, %d brackets, %d case rows, "
+        "%d orbits, %d script sets, %d digit blocks\n"
         % (len(tables.records), len(tables.stage2) // BLOCK_SIZE,
            len(tables.runs), len(tables.scx_pool), len(entries),
            len(tables.value_aliases), len(tables.decomp_rows),
            len(tables.decomp_pool), len(tables.compose), len(ucd.mirroring),
-           len(ucd.brackets)))
+           len(ucd.brackets), len(tables.case_rows), len(tables.orbit_rows),
+           len(tables.script_run_sets), len(tables.digit_zeros)))
     return 0
 
 

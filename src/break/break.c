@@ -175,6 +175,9 @@ static int at_next(const Text * text, size_t at, uint32_t * out,
   size_t width = guni_utf8_decode(text->utf8 + at, text->length - at, out,
       &valid);
   if (width == 0) {
+    /* Unreachable: the length was checked above, and the decoder consumes at
+     * least one byte of any non-empty input. Here because a zero would make
+     * every loop over at_next() spin. */
     return 0;
   }
   *out_end = at + width;
@@ -706,6 +709,11 @@ static int sentence_break(const Text * text, size_t at, uint32_t before,
   size_t tail = at;
   size_t start = 0;
   if (sb_para_sep(sb_before(text, tail, &start))) {
+    /* Unreachable, and kept: rule SB4 breaks after every ParaSep and is listed
+     * before this one, so a position immediately after a paragraph separator
+     * has already been answered. The clause is in SB11's own text, and a
+     * version of this function that dropped it would no longer read as the
+     * rule - which is how a later editor comes to delete the wrong line. */
     tail = start;
   }
   if (sentence_terminator(text, tail, 1) != GUNI_SB_OTHER) {
@@ -856,8 +864,13 @@ static size_t lb_skip_back(const Text * text, size_t at, uint32_t value) {
   }
 }
 
-/** LB25's `NU ( SY | IS )*` read backwards from `at`. */
-static int lb_number_before(const Text * text, size_t at, size_t * out_start) {
+/**
+ * LB25's `NU ( SY | IS )*` read backwards from `at`.
+ *
+ * regex's version reports where the number started; both callers there pass
+ * NULL for it, and both callers here do, so the parameter is gone.
+ */
+static int lb_number_before(const Text * text, size_t at) {
   size_t scan = at;
   for (;;) {
     LbChar here = lb_prev(text, scan);
@@ -869,9 +882,6 @@ static int lb_number_before(const Text * text, size_t at, size_t * out_start) {
       continue;
     }
     if (here.value == GUNI_LB_NU) {
-      if (out_start) {
-        *out_start = here.start;
-      }
       return 1;
     }
     return 0;
@@ -1128,7 +1138,7 @@ static int line_break(const Text * text, size_t at) {
     if (a == GUNI_LB_CL || a == GUNI_LB_CP) {
       from = left.start;
     }
-    if (lb_number_before(text, from, NULL)) {
+    if (lb_number_before(text, from)) {
       return 0;
     }
   }
@@ -1145,7 +1155,7 @@ static int line_break(const Text * text, size_t at) {
   if ((a == GUNI_LB_PO || a == GUNI_LB_PR || a == GUNI_LB_HY || a == GUNI_LB_IS) && b == GUNI_LB_NU) {
     return 0; // LB25
   }
-  if (b == GUNI_LB_NU && lb_number_before(text, at, NULL)) {
+  if (b == GUNI_LB_NU && lb_number_before(text, at)) {
     return 0; // LB25: `NU ( SY | IS )* x NU`
   }
 

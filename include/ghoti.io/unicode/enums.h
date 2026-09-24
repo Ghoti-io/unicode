@@ -1104,6 +1104,27 @@ typedef enum {
 #define GUNI_NORM_MAX_EXPANSION_NFKC 18
 
 /**
+ * @brief Words of bitset in a script-run check.
+ *
+ * One bit per script, plus three for UTS #39 section 5.1's
+ * augmented scripts - Japanese, Korean and HanBopomofo - which are
+ * not Unicode script values and exist only so that a three-way mix
+ * of Han, Hangul and Bopomofo falls out of an ordinary set
+ * intersection. Generated, because it follows from how many scripts
+ * there are.
+ */
+#define GUNI_SCRIPT_RUN_WORDS 3
+
+/**
+ * @brief The most codepoints one codepoint becomes under a full case mapping.
+ *
+ * Generated from SpecialCasing.txt and CaseFolding.txt, not stated: a
+ * caller sizes a buffer as `length * GUNI_CASE_MAX_EXPANSION` and needs no
+ * preflight.
+ */
+#define GUNI_CASE_MAX_EXPANSION 3
+
+/**
  * @brief The single-letter General_Category groups, as masks.
  *
  * `\\p{L}` asks whether a codepoint's category is any of five, and
@@ -1120,6 +1141,21 @@ typedef enum {
 #define GUNI_GC_MASK_P (GUNI_GC_MASK(GUNI_GC_CONNECTOR_PUNCTUATION) | GUNI_GC_MASK(GUNI_GC_DASH_PUNCTUATION) | GUNI_GC_MASK(GUNI_GC_CLOSE_PUNCTUATION) | GUNI_GC_MASK(GUNI_GC_FINAL_PUNCTUATION) | GUNI_GC_MASK(GUNI_GC_INITIAL_PUNCTUATION) | GUNI_GC_MASK(GUNI_GC_OTHER_PUNCTUATION) | GUNI_GC_MASK(GUNI_GC_OPEN_PUNCTUATION))
 #define GUNI_GC_MASK_S (GUNI_GC_MASK(GUNI_GC_CURRENCY_SYMBOL) | GUNI_GC_MASK(GUNI_GC_MODIFIER_SYMBOL) | GUNI_GC_MASK(GUNI_GC_MATH_SYMBOL) | GUNI_GC_MASK(GUNI_GC_OTHER_SYMBOL))
 #define GUNI_GC_MASK_Z (GUNI_GC_MASK(GUNI_GC_LINE_SEPARATOR) | GUNI_GC_MASK(GUNI_GC_PARAGRAPH_SEPARATOR) | GUNI_GC_MASK(GUNI_GC_SPACE_SEPARATOR))
+
+/**
+ * @brief The language-sensitive case rules SpecialCasing.txt defines.
+ *
+ * Not a locale: an argument. setlocale() is process-wide state that
+ * changes how a library behaves (design.md section 2, M7), and the
+ * Turkish dotless i is the case where that state silently corrupts
+ * data. Generated, because the languages are the UCD's: a new one
+ * appends a member here rather than needing a hand-edit.
+ */
+typedef enum {
+  GUNI_LANG_NONE = 0,   ///< The language-neutral mappings.
+  GUNI_LANG_TURKIC = 1, ///< Turkish and Azerbaijani: the dotless i.
+  GUNI_LANG_LITHUANIAN = 2 ///< Lithuanian: the retained dot above.
+} GUNI_CaseTailoring;
 
 /**
  * @brief UAX #15's quick-check answer.

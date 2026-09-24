@@ -33,10 +33,12 @@
 #include <ghoti.io/unicode/allocator.h>
 #include <ghoti.io/unicode/bidi.h>
 #include <ghoti.io/unicode/break.h>
+#include <ghoti.io/unicode/case.h>
 #include <ghoti.io/unicode/char.h>
 #include <ghoti.io/unicode/core.h>
 #include <ghoti.io/unicode/enums.h>
 #include <ghoti.io/unicode/norm.h>
+#include <ghoti.io/unicode/script.h>
 #include <ghoti.io/unicode/set.h>
 #include <ghoti.io/unicode/utf.h>
 #include <ghoti.io/unicode/macros.h>

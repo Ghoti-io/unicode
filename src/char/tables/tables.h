@@ -63,6 +63,21 @@
 #define GUNI_DECOMP_COUNT 5914
 #define GUNI_DECOMP_POOL_COUNT 6763
 #define GUNI_COMPOSE_COUNT 961
+/* UTS #39 script runs. GUNI_SCRIPT_RUN_WORDS is in enums.h:
+ * GUNI_ScriptRun holds the bitset, so its width is public. */
+#define GUNI_SCRIPT_RUN_SET_COUNT 284
+#define GUNI_DIGIT_ZERO_COUNT 77
+#define GUNI_CASE_COUNT 3037
+#define GUNI_CASE_POOL_COUNT 494
+#define GUNI_CASE_CONDITIONAL_COUNT 16
+#define GUNI_TURKIC_FOLD_COUNT 2
+#define GUNI_ORBIT_COUNT 1482
+#define GUNI_ORBIT_POOL_COUNT 2994
+/* The four columns of every case table, in this order. */
+#define GUNI_CASE_UPPER 0
+#define GUNI_CASE_LOWER 1
+#define GUNI_CASE_TITLE 2
+#define GUNI_CASE_FOLD 3
 #define GUNI_MIRROR_COUNT 428
 #define GUNI_BRACKET_COUNT 128
 /* A composition key: the two codepoints, 21 bits each. */
@@ -131,6 +146,59 @@ extern const uint8_t guni_decomp_nfkd_length[GUNI_DECOMP_COUNT];
  * two codepoints whose codepoint is not Full_Composition_Exclusion. */
 extern const uint64_t guni_compose_key[GUNI_COMPOSE_COUNT];
 extern const uint32_t guni_compose_value[GUNI_COMPOSE_COUNT];
+
+/* UTS #39 script runs. One augmented bitset per distinct Script_Extensions
+ * set, indexed by that set's offset in guni_scx_pool - which is a field of the
+ * property record, so a check costs no second search. */
+extern const uint64_t
+    guni_script_run_sets[GUNI_SCRIPT_RUN_SET_COUNT][GUNI_SCRIPT_RUN_WORDS];
+extern const uint16_t guni_script_run_by_offset[GUNI_SCX_POOL_COUNT];
+
+/* The first codepoint of each block of ten decimal digits. */
+extern const uint32_t guni_digit_zeros[GUNI_DIGIT_ZERO_COUNT];
+
+/* Case mappings. One sorted table over every codepoint with any, gated by
+ * Changes_When_Casemapped and Changes_When_Casefolded in the property record,
+ * so a codepoint with none costs no search. A simple mapping of 0 means the
+ * identity: 0 is not a mapping target, so it is unambiguous. */
+extern const uint32_t guni_case_codepoint[GUNI_CASE_COUNT];
+extern const uint32_t guni_case_simple[GUNI_CASE_COUNT][4];
+extern const uint16_t guni_case_full_offset[GUNI_CASE_COUNT][4];
+extern const uint8_t guni_case_full_length[GUNI_CASE_COUNT][4];
+extern const uint32_t guni_case_pool[GUNI_CASE_POOL_COUNT];
+
+/** SpecialCasing.txt's conditions, which case.c implements one by one. */
+typedef enum {
+  GUNI_CASE_COND_NONE = 0,
+  GUNI_CASE_COND_FINAL_SIGMA,
+  GUNI_CASE_COND_AFTER_SOFT_DOTTED,
+  GUNI_CASE_COND_MORE_ABOVE,
+  GUNI_CASE_COND_AFTER_I,
+  GUNI_CASE_COND_NOT_BEFORE_DOT
+} GuniCaseCondition;
+
+/** One conditional mapping: sixteen lines of SpecialCasing.txt. */
+typedef struct {
+  uint32_t codepoint;
+  uint8_t language;  ///< A GUNI_CaseTailoring.
+  uint8_t condition; ///< A GuniCaseCondition.
+  uint16_t offset[4];
+  uint8_t length[4];
+} GuniCaseConditional;
+
+extern const GuniCaseConditional
+    guni_case_conditional[GUNI_CASE_CONDITIONAL_COUNT];
+
+/* CaseFolding.txt's T status: the two codepoints a Turkic fold differs on. */
+extern const uint32_t guni_turkic_fold_from[GUNI_TURKIC_FOLD_COUNT];
+extern const uint32_t guni_turkic_fold_to[GUNI_TURKIC_FOLD_COUNT];
+
+/* The fold orbits: every codepoint that folds to the same value, keyed by
+ * that value. What a case-insensitive character class needs. */
+extern const uint32_t guni_orbit_value[GUNI_ORBIT_COUNT];
+extern const uint16_t guni_orbit_offset[GUNI_ORBIT_COUNT];
+extern const uint8_t guni_orbit_length[GUNI_ORBIT_COUNT];
+extern const uint32_t guni_orbit_pool[GUNI_ORBIT_POOL_COUNT];
 
 /* UAX #9's rule L4: the mirrored glyph, and BD14/BD15's bracket pairs for
  * rule N0. Sorted by codepoint; both are small enough that a binary search is

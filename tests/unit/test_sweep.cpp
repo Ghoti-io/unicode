@@ -99,6 +99,84 @@ bool in_record(GUNI_Property id) {
   return id != GUNI_PROPERTY_BLOCK;
 }
 
+/** A mapping as the oracle spells it: hex codepoints, or "None". */
+std::string mapping_text(const std::vector<uint32_t> & mapping, uint32_t cp) {
+  if (mapping.size() == 1 && mapping[0] == cp) {
+    return "None";
+  }
+  std::string out;
+  char buffer[16];
+  for (size_t index = 0; index < mapping.size(); ++index) {
+    std::snprintf(buffer, sizeof(buffer), "%04X", mapping[index]);
+    if (index != 0) {
+      out += ' ';
+    }
+    out += buffer;
+  }
+  return out.empty() ? std::string("None") : out;
+}
+
+/** The case mappings, which are swept as pseudo-properties. */
+bool case_mapping_text(const std::string & name, uint32_t cp,
+    std::string * out) {
+  if (name == "Simple_Uppercase_Mapping") {
+    *out = mapping_text({guni_to_upper_simple(cp)}, cp);
+    return true;
+  }
+  if (name == "Simple_Lowercase_Mapping") {
+    *out = mapping_text({guni_to_lower_simple(cp)}, cp);
+    return true;
+  }
+  if (name == "Simple_Titlecase_Mapping") {
+    *out = mapping_text({guni_to_title_simple(cp)}, cp);
+    return true;
+  }
+  if (name == "Simple_Case_Folding") {
+    *out = mapping_text({guni_case_fold_simple(cp)}, cp);
+    return true;
+  }
+  if (name == "Case_Folding") {
+    uint32_t buffer[GUNI_CASE_MAX_EXPANSION];
+    size_t written = 0;
+    if (guni_case_fold(&cp, 1, false, nullptr, buffer, GUNI_CASE_MAX_EXPANSION,
+            &written)
+        != GUNI_OK) {
+      *out = "<error>";
+      return true;
+    }
+    *out = mapping_text(std::vector<uint32_t>(buffer, buffer + written), cp);
+    return true;
+  }
+  if (name == "Uppercase_Mapping" || name == "Lowercase_Mapping"
+      || name == "Titlecase_Mapping") {
+    /* The oracle sweeps only the *unconditional* full mappings, so this asks
+     * for the mapping of a one-character text: no text around it means no
+     * condition can hold, which is exactly the unconditional answer. */
+    uint32_t buffer[GUNI_CASE_MAX_EXPANSION];
+    size_t written = 0;
+    GUNI_Result result;
+    if (name == "Uppercase_Mapping") {
+      result = guni_to_upper_at(&cp, 1, 0, GUNI_LANG_NONE, buffer,
+          GUNI_CASE_MAX_EXPANSION, &written);
+    }
+    else if (name == "Lowercase_Mapping") {
+      result = guni_to_lower_at(&cp, 1, 0, GUNI_LANG_NONE, buffer,
+          GUNI_CASE_MAX_EXPANSION, &written);
+    }
+    else {
+      result = guni_to_title_at(&cp, 1, 0, GUNI_LANG_NONE, buffer,
+          GUNI_CASE_MAX_EXPANSION, &written);
+    }
+    if (result != GUNI_OK) {
+      *out = "<error>";
+      return true;
+    }
+    *out = mapping_text(std::vector<uint32_t>(buffer, buffer + written), cp);
+    return true;
+  }
+  return false;
+}
+
 /**
  * A cheap integer that changes exactly when the property's value changes.
  *
@@ -109,6 +187,17 @@ bool in_record(GUNI_Property id) {
  * would not.
  */
 uint64_t property_key(const std::string & name, GUNI_Property id, uint32_t cp) {
+  std::string mapping;
+  if (case_mapping_text(name, cp, &mapping)) {
+    /* Cheap enough: the mappings are at most three codepoints, so the text is
+     * at most fourteen characters and hashing it beats a special case per
+     * mapping. */
+    uint64_t key = 1469598103934665603ULL;
+    for (char byte : mapping) {
+      key = (key ^ (uint64_t)(unsigned char)byte) * 1099511628211ULL;
+    }
+    return key;
+  }
   if (name == "Numeric_Value") {
     int64_t numerator = 0;
     uint32_t denominator = 0;
@@ -134,6 +223,10 @@ uint64_t property_key(const std::string & name, GUNI_Property id, uint32_t cp) {
 
 /** The property's value at @p cp, spelled the way the oracle spells it. */
 std::string value_text(const std::string & name, GUNI_Property id, uint32_t cp) {
+  std::string mapping;
+  if (case_mapping_text(name, cp, &mapping)) {
+    return mapping;
+  }
   if (name == "Numeric_Value") {
     int64_t numerator = 0;
     uint32_t denominator = 0;
@@ -293,7 +386,9 @@ protected:
       GUNI_Property id = static_cast<GUNI_Property>(0);
       bool known = guni_property_by_name(entry.first.c_str(),
                        entry.first.size(), &id) == GUNI_OK;
-      if (!known && entry.first != "Numeric_Value") {
+      std::string ignored;
+      if (!known && entry.first != "Numeric_Value"
+          && !case_mapping_text(entry.first, 'A', &ignored)) {
         unknown_->push_back(entry.first);
         continue;
       }
@@ -420,7 +515,9 @@ int main(int argc, char ** argv) {
   if (dump != nullptr) {
     GUNI_Property id = static_cast<GUNI_Property>(0);
     bool known = guni_property_by_name(dump, std::strlen(dump), &id) == GUNI_OK;
-    if (!known && std::strcmp(dump, "Numeric_Value") != 0) {
+    std::string ignored;
+    if (!known && std::strcmp(dump, "Numeric_Value") != 0
+        && !case_mapping_text(dump, 'A', &ignored)) {
       std::fprintf(stderr, "no property named %s\n", dump);
       return 2;
     }

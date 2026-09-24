@@ -346,6 +346,88 @@ def sweep(ucd_dir):
             blocks[cp] = columns[1]
     out["Block"] = blocks
 
+    # The case mappings, as the text the library reports: a hex codepoint for
+    # a simple mapping, a space-separated sequence for a full one, and "None"
+    # for the identity. Sweeping these makes every one of the 3,037 case rows
+    # checked against a second parse, which no conformance file does - the UCD
+    # publishes no case test file, and the sixteen conditional lines are the
+    # only part that needs hand-written tests.
+    simple_upper = ["None"] * (MAX_CODEPOINT + 1)
+    simple_lower = ["None"] * (MAX_CODEPOINT + 1)
+    simple_title = ["None"] * (MAX_CODEPOINT + 1)
+    for line in data_lines(os.path.join(ucd_dir, "UnicodeData.txt")):
+        columns = [column.strip() for column in line.split(";")]
+        if len(columns) < 15:
+            continue
+        cp = int(columns[0], 16)
+        if columns[12]:
+            simple_upper[cp] = "%04X" % int(columns[12], 16)
+        if columns[13]:
+            simple_lower[cp] = "%04X" % int(columns[13], 16)
+        # An empty titlecase field means the uppercase mapping stands, which is
+        # the rule UnicodeData.txt states in its own documentation and which
+        # every implementation has to apply for the thirty-one digraphs to
+        # come out right.
+        simple_title[cp] = ("%04X" % int(columns[14], 16)) if columns[14] \
+            else simple_upper[cp]
+    out["Simple_Uppercase_Mapping"] = simple_upper
+    out["Simple_Lowercase_Mapping"] = simple_lower
+    out["Simple_Titlecase_Mapping"] = simple_title
+
+    simple_fold = ["None"] * (MAX_CODEPOINT + 1)
+    full_fold = ["None"] * (MAX_CODEPOINT + 1)
+    turkic_fold = {}
+    for line in data_lines(os.path.join(ucd_dir, "CaseFolding.txt")):
+        columns = [column.strip() for column in line.split(";")]
+        if len(columns) < 3:
+            continue
+        cp = int(columns[0], 16)
+        mapping = " ".join("%04X" % int(part, 16) for part in columns[2].split())
+        if columns[1] in ("C", "S"):
+            simple_fold[cp] = mapping
+        if columns[1] in ("C", "F"):
+            full_fold[cp] = mapping
+        if columns[1] == "T":
+            turkic_fold[cp] = mapping
+    out["Simple_Case_Folding"] = simple_fold
+    out["Case_Folding"] = full_fold
+
+    # The unconditional full mappings. Two things about them that the first
+    # version of this got wrong, both of them about what "no mapping" means:
+    #
+    #   * a full mapping **defaults to the simple one**. SpecialCasing.txt
+    #     lists only the characters whose full mapping differs, so starting
+    #     from "None" made the oracle claim that "a" upper-cases to nothing;
+    #   * an explicit mapping equal to the codepoint is the identity, and the
+    #     library cannot report it as anything else - guni_to_title_simple()
+    #     returns a codepoint, not an option - so it is normalised to "None"
+    #     here. U+01C5 is the case: its titlecase field names itself.
+    #
+    # The conditional lines are excluded: their answer depends on the text
+    # around the character, so a per-codepoint sweep has nothing to compare,
+    # and the sixteen of them are hand-written tests instead.
+    full_upper = list(simple_upper)
+    full_lower = list(simple_lower)
+    full_title = list(simple_title)
+    for line in data_lines(os.path.join(ucd_dir, "SpecialCasing.txt")):
+        columns = [column.strip() for column in line.split(";")]
+        if len(columns) < 4 or (len(columns) > 4 and columns[4]):
+            continue
+        cp = int(columns[0], 16)
+        def sequence(text):
+            return " ".join("%04X" % int(part, 16) for part in text.split())
+        full_lower[cp] = sequence(columns[1])
+        full_title[cp] = sequence(columns[2])
+        full_upper[cp] = sequence(columns[3])
+    for table in (simple_upper, simple_lower, simple_title, simple_fold,
+                  full_fold, full_upper, full_lower, full_title):
+        for cp in range(MAX_CODEPOINT + 1):
+            if table[cp] != "None" and table[cp] == "%04X" % cp:
+                table[cp] = "None"
+    out["Uppercase_Mapping"] = full_upper
+    out["Lowercase_Mapping"] = full_lower
+    out["Titlecase_Mapping"] = full_title
+
     # Numeric_Value, as the exact rational the library reports.
     numeric = ["None"] * (MAX_CODEPOINT + 1)
     for line in data_lines(os.path.join(ucd_dir, "DerivedNumericValues.txt")):

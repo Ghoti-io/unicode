@@ -924,6 +924,8 @@ TIER0_FILES := include/ghoti.io/unicode/core.h include/ghoti.io/unicode/utf.h \
 	include/ghoti.io/unicode/allocator.h \
 	src/core/*.c src/core/*.h src/utf/*.c src/utf/*.h src/char/*.c src/char/*.h \
 	src/char/tables/*.c src/char/tables/*.h \
+	src/norm/tables/*.c src/case/tables/*.c src/script/tables/*.c \
+	src/bidi/tables/*.c \
 	src/set/*.c src/set/*.h src/script/*.c src/script/*.h src/case/*.c src/case/*.h \
 	src/norm/*.c src/norm/*.h src/break/*.c src/break/*.h src/bidi/*.c src/bidi/*.h \
 	src/unicode.c
@@ -1372,8 +1374,9 @@ $(eval $(call fuzz-rule,fuzz_utf,utf))
 $(eval $(call fuzz-rule,fuzz_norm,norm))
 $(eval $(call fuzz-rule,fuzz_bidi,bidi))
 $(eval $(call fuzz-rule,fuzz_break,break))
+$(eval $(call fuzz-rule,fuzz_case,case))
 
-FUZZ_NAMES := utf norm bidi break
+FUZZ_NAMES := utf norm bidi break case
 
 fuzz: ## Build and run every fuzzer for $(FUZZ_TIME) seconds each
 fuzz: $(addprefix fuzz-run-,$(FUZZ_NAMES))
