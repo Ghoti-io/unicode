@@ -864,7 +864,7 @@ Two things are specific to Unicode oracles:
   version also excluded every codepoint with no age at all - 814,664 of them,
   73% of the codespace. Assignments are never withdrawn, so a codepoint
   unassigned in 17.0.0 is unassigned in every earlier version and *both sides
-  have an answer for it*. Comparing them takes the strict run from 2.2 million
+  have an answer for it*. Comparing them took the strict run from 2.2 million
   comparisons to 7,947,413 and puts the end of every trie run under the oracle's
   eye, which is where a last range one codepoint too long would show. It also
   bought a real reading: CPython 3.15 answers a *default* `Bidi_Class` for
@@ -881,20 +881,34 @@ Two things are specific to Unicode oracles:
   so `unicodedata_diff.py` is **advisory by default** and `--strict` is for an
   oracle on our own version. Measured against the two pins: UCD 16.0.0 leaves 2
   differences (U+0295 and U+5146, the two decisions that land in 17.0) and 6,153
-  "ours only"; UCD 17.0.0 leaves **none of either**, across 7,947,413
+  "ours only"; UCD 17.0.0 leaves **none of either**, across 7,958,585
   comparisons - which is what a matching pin buys, and it retires the whole
   triage rather than shortening it. It also reports four buckets rather than two -
   agreed, differed, ours only, theirs only - because "ours only" is usually the
   oracle's limitation (it does not compute the Tangut names) and "theirs only"
   is the bucket that would most likely be ours.
 
-  The script's own two defects are worth recording as the shape of the risk: it
-  first compared `Decomposition_Type` as short aliases against the UCD's tag
-  text, reporting all 13,233 decomposable characters, and then reported the
-  11,172 Hangul syllables because `unicodedata.decomposition()` does not return
-  an arithmetic decomposition. **An oracle that is wrong looks exactly like an
-  implementation that is wrong**, from the outside, which is why the triage
-  lives in the script rather than in somebody's memory.
+  The script's own three defects are worth recording as the shape of the risk.
+  It first compared `Decomposition_Type` as short aliases against the UCD's tag
+  text, reporting all 13,233 decomposable characters; then it reported the 11,172
+  Hangul syllables, because this machine's `python3` does not return an
+  arithmetic decomposition. **An oracle that is wrong looks exactly like an
+  implementation that is wrong**, from the outside, which is why the triage lives
+  in the script rather than in somebody's memory.
+
+  The third is the *fix* for the second, and it is the one worth carrying
+  forward: the Hangul syllables were excluded, and **an exclusion is a
+  measurement that expires when its subject moves**. Both pins answer
+  `1100 1161` for U+AC00, and so does any 3.13 later than 3.13.5 - the change is
+  a CPython patch release, which is the one axis `containers/IMAGES` deliberately
+  does not name, since its version field is the UCD's. The exclusion was
+  therefore true where it was taken, false on both references the gates actually
+  use, and invisible in a green line: 11,172 codepoints that the strict gate
+  counted as "not comparable" and did not look at. Deleting it is what takes that
+  column to zero for every property. It was deleted rather than made conditional
+  on probing the reference, because a probe keeps the skip correct and makes it
+  silent - a later CPython that stopped answering would withdraw the 11,172 and
+  the gate would still print `ok`, where a deletion makes it fail.
 - **The ICU driver builds inside its image** against the image's ICU alone,
   as `regex`'s `pcre2_match` builds against pcre2 alone, so that the reference
   cannot reach the implementation it answers for. **Built**: ICU 78.3, which
@@ -1222,7 +1236,7 @@ of it; the pairwise sweep's own artifact is committed and waiting for them
 `oracle_run.py`, `containers/IMAGES` and `unicodedata_ask.py`, with
 `make check-oracle-unicodedata` against a released CPython and
 `make check-oracle-unicodedata-strict` against one carrying this library's own
-UCD version, where 7,947,413 comparisons over all 1,114,112 codepoints leave no
+UCD version, where 7,958,585 comparisons over all 1,114,112 codepoints leave no
 difference at all. **The ICU differential from C's gate column is built too**, which was the last
 thing the image pattern was blocking: `tools/oracle/icu_break.cpp` compiled
 *inside* its image against ICU 78.3 alone - the `pcre2` shape in

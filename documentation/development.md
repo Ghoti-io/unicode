@@ -127,7 +127,7 @@ behind these tables. Every disagreement it reported was that skew. The reference
 is now `unicodedata_ask.py` run in an image pinned by digest in
 `tools/oracle/containers/IMAGES`, through the pattern `notes/suite/CONTAINERS.md`
 describes, and against a pin carrying UCD 17.0.0 there are **no differences at
-all** over 7,947,413 comparisons.
+all** over 7,958,585 comparisons, and nothing reported as not comparable.
 
 Three rules the pattern is built on, and each has been observed to hold:
 

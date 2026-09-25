@@ -956,7 +956,7 @@ check-oracle-unicodedata: ucd-present $(TEST_EXECUTABLES)
 check-oracle-unicodedata-strict: ## The same, against a reference on this library's own UCD version
 # This is the one that can fail. python-next carries UCD 17.0.0, an exact match
 # with tools/ucd/UCD_VERSION, and against a matching reference there is no skew
-# left to excuse a disagreement: 7,947,413 comparisons over all 1,114,112
+# left to excuse a disagreement: 7,958,585 comparisons over all 1,114,112
 # codepoints, and any difference is a defect in one of the two.
 #
 # The alias is how a second pin is asked the first one's questions; see

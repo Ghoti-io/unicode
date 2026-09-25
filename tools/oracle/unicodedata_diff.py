@@ -57,19 +57,36 @@ version of this excluded every unassigned codepoint as well - 814,664 of them,
 73% of the codespace, reported as "not comparable". That was wrong in a way that
 read as caution: assignments are never withdrawn, so a codepoint unassigned in
 17.0.0 is unassigned in every earlier version, and both sides have an answer for
-it. Comparing them is what takes the strict run from 2.2 million comparisons to
+it. Comparing them is what took the strict run from 2.2 million comparisons to
 7,947,413, and it puts the end of every run in the trie under the oracle's eye -
 a last range one codepoint too long is the defect this differential is best
-placed to catch and was structurally unable to see.
+placed to catch and was structurally unable to see. The Hangul deletion below
+added the remaining 11,172, so the strict run makes 7,958,585 comparisons today
+and reports nothing not comparable at all.
 
-`Decomposition_Type` over the Hangul syllables is still skipped, and for a
-reason that is the oracle's rather than the data's: `unicodedata.decomposition()`
-returns the mapping `UnicodeData.txt` records, and a Hangul syllable's is
-arithmetic and recorded nowhere. The UCD's own `DerivedDecompositionType.txt`
-says `Canonical` for all 11,172 of them, which is what this library says. Every
-skip is now counted under the reason for it, because one figure covering three
-different reasons means something different against a matching pin while
-printing the same.
+**The 11,172 Hangul syllables are compared, and used not to be.** This tool
+skipped them for `Decomposition_Type` on the grounds that
+`unicodedata.decomposition()` returns only the mapping `UnicodeData.txt`
+records, and a Hangul syllable's is arithmetic and recorded nowhere. That was
+measured against this machine's `python3` and is false on both pins: 3.14.7 and
+3.15.0rc2 both answer `1100 1161` for U+AC00, and so does 3.13.15 - the change
+is a CPython patch release, not a version of the UCD, which is why the version
+field of `containers/IMAGES` cannot express it (3.13.5 answers `''` and 3.13.15
+does not, on the same `unidata_version`). Both pins therefore resolve
+`canonical` for all 11,172, which is what `DerivedDecompositionType.txt` and
+this library say.
+
+The exclusion is deleted rather than made conditional on a probe of the
+reference. A probe would keep the skip correct and make it invisible: the strict
+gate would withdraw 11,172 comparisons and still print `ok` if some later
+CPython stopped answering, which is the shape a gate must not have. Deleted, the
+same regression fails the gate. A host-mode run on an interpreter old enough to
+lack it reports 11,172 differences, and that is the reading it is entitled to -
+host mode is unpinned, says so in the line it prints, and is advisory.
+
+Every skip is counted under the reason for it, because one figure covering
+several reasons means something different against a matching pin while printing
+the same.
 
 What is compared: General_Category, Canonical_Combining_Class, Bidi_Class,
 East_Asian_Width, Bidi_Mirrored, Decomposition_Type, Numeric_Value and the
@@ -465,15 +482,6 @@ def main(argv):
             for cp in range(low, high + 1):
                 if too_new(cp):
                     tally.skip("newer than the oracle")
-                    continue
-                if 0xAC00 <= cp <= 0xD7A3:
-                    # A documented limitation of the oracle rather than a
-                    # difference: unicodedata.decomposition() returns the
-                    # mapping UnicodeData.txt records, and a Hangul syllable's
-                    # decomposition is arithmetic and is recorded nowhere. The
-                    # UCD's own DerivedDecompositionType.txt says Canonical for
-                    # all 11,172 of them, which is what this library says.
-                    tally.skip("Hangul, decomposed arithmetically")
                     continue
                 # The driver does the mechanical half - reading the tag out of
                 # `<noBreak> 0020`, and answering "canonical" where there is no
