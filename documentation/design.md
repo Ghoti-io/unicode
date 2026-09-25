@@ -1176,8 +1176,14 @@ is vim 9.1's, from `strdisplaywidth()` over all 1,114,112 codepoints, and it is
 not East_Asian_Width. Against this library's `guni_east_asian_width()` it
 disagrees on **362 codepoints** - 198 vim draws in two cells that Unicode calls
 neither Wide nor Fullwidth (165 of them emoji, 31 C0 controls vim renders as
-`^X`), and 164 Unicode calls Wide or Fullwidth that vim draws in one (145 of
-them `Other_Letter`, mostly Tangut and Khitan, where vim's table simply lags).
+`^X`), and 164 Unicode calls Wide or Fullwidth that vim does not draw in two -
+157 of them in one cell (145 `Other_Letter`, mostly Tangut and Khitan, where
+vim's table simply lags) and **7 in none at all**, the `Nonspacing_Mark`s at
+U+302A..302D, U+3099 and U+309A, which `display.c` line 166 gives zero cells.
+The first revision of this paragraph said all 164 were one cell, which is the
+hazard of naming a set by subtraction: the set was computed as "Wide and not
+two cells" and then described as "one cell", and a zero-cell entry satisfies
+the arithmetic while contradicting the words.
 Its zero-width column is a strict subset of `Mn | Me | Cf`, 2,033 of that
 property's 2,242 members, so it is not that property either.
 
