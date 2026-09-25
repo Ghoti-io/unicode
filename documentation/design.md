@@ -1138,7 +1138,23 @@ E. (`font`'s tiers 0 and 1 - file parsing, outlines, rasterisation - need no
 Unicode at all and can proceed in parallel from phase B onward; see
 `libs/font/documentation/design.md` §17.)
 
-**Phases A, B and C are built**, in five commits, each of which builds and
+**Phases A, B and C are built**, and **D landed on 2026-09-24** - `text` is
+the first consumer, migrated by its own session. Its installed library now links
+`libghoti.io-unicode-0` and imports ten symbols across four of these headers:
+`guni_normalize` (`norm.h`); `guni_general_category`, `guni_combining_class`,
+`guni_bidi_class`, `guni_script`, `guni_joining_type` and `guni_has_property`
+(`char.h`); `guni_utf8_to_codepoints` and `guni_utf8_from_codepoints` (`utf.h`);
+`guni_limits_default` (`core.h`). Its `nfc_tables.c` is gone and `nfc.c` and
+`nfc_utf8.c` are adapters - 254 and 213 lines became 73 and 131.
+
+That is U4, and the part of it that matters to this library is the part the plan
+named: **the API has survived a second consumer.** It was designed against three
+and shaped by one, and the first migration reached four headers rather than the
+one `norm.h` a normalisation consumer might have needed - `guni_has_property`
+and `guni_joining_type` are IDNA's validity checks, which is exactly what the
+phase D row predicted. No header, signature or contract changed to let it in.
+
+The phases were built in five commits, each of which builds and
 passes `make test`. What the three of them came to:
 
 | | A | B | C |
@@ -1224,7 +1240,7 @@ that they agree.
 | **A** | Scaffold from `model` per `CONVENTIONS.md` §12; `core.h`, `utf.h`; `tools/ucd/` with `fetch.sh`, `gen_tables.py` (ported from `regex`), `UCD_VERSION`; the committed conformance files; `char.h` and `set.h` with their tables; the exhaustive sweep (§12.1) and the trie/range agreement test; `check-ucd-tables`, `check-layering`, `check-symbols`; the suite-level `check-ucd-pins.sh` | M | sweep sums match `regex`'s `property.c` for every property both have; every gate observed to fail once | **U1: a library exists that answers every property for every codepoint, provably identically to what `regex` answers today** |
 | **B** | The modules nobody has: `norm.h` in all four forms with quick-check and the expansion constants; `bidi.h`; the shaping properties in `char.h` (joining, Indic, USE inputs, emoji, vertical orientation, mirroring) | L | `NormalizationTest`, `BidiTest`, `BidiCharacterTest`, all committed, all passing; the sweep extended to the new properties | **U2: `font`'s shaping tier has every Unicode input it needs** |
 | **C** | Move `break.c`, `case.c`, `script_run.c` and `names.c` with their tables into `break.h`, `case.h`, `char.h`, `script.h`, `name.h`; **LB1 exposed** (§7.3); the iterator form; `GUNI_BreakProvider`; the pairwise Line_Break sweep against the pre-move `regex` build; `test_unicode.cpp` and `test_break.cpp` move here | M | the four UAX #29/#14 files; the pairwise sweep byte-identical under `STRICT`; the ICU differential | **U3: every algorithm `regex` had, with its tailoring axis opened** |
-| **D** | Migrate `text`: `nfc.c`, `nfc_utf8.c`, `nfc_tables.c` deleted; IDNA's validity checks read `char.h`; `workspace.txt` gains `unicode` on `text`'s line | S | `text`'s 1,534 tests unchanged; its NFC oracle script unchanged; the sweep sums for the composition tables unchanged | **U4: first consumer migrated; the API has survived a second consumer** |
+| **D** ✅ | Migrate `text`: `nfc.c`, `nfc_utf8.c`, `nfc_tables.c` deleted; IDNA's validity checks read `char.h`; `workspace.txt` gains `unicode` on `text`'s line | S | `text`'s 1,534 tests unchanged; its NFC oracle script unchanged; the sweep sums for the composition tables unchanged | **U4: first consumer migrated; the API has survived a second consumer** |
 | **E** | Migrate `regex`: `src/unicode/` reduced to `vim_class.c` and the ECMAScript legacy rules; `regex` applies LB1 with `STRICT`; `\p{...}`, `\N{...}`, `\b{...}` and `(*sr:...)` over this library; `workspace.txt` updated | M | `regex`'s 484 tests and 33,829 vectors unchanged; the Perl differential unchanged; the pairwise sweep unchanged | **U5: the duplicate is gone; three libraries, one Unicode** |
 | **F** | `ctang`: `src/unicodeString.c` calls `guni_break_iter_*` for graphemes; the UTF-16 conversions and the ICU dependency removed; `workspace.txt` and the Makefile's dependency block updated | S | `ctang`'s 174 test executions unchanged; `pkg-config icu-uc` no longer required by any library | **U6: ICU is not linked by anything in the suite** |
 
