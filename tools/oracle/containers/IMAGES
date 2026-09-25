@@ -8,8 +8,20 @@
 #
 # The version field is checked at run time against what the reference says it
 # is, and for this library it names the **UCD version, not the interpreter's**.
-# That is the pin that decides what a comparison means: CPython's own release
-# number is incidental, and `unicodedata.unidata_version` is the reference.
+# That is the pin that decides what a comparison *means*.
+#
+# It is not the pin that decides what the reference *answers*, and the first
+# version of this file said it was - "CPython's own release number is
+# incidental". It is not. CPython 3.13.5 and 3.13.15 both report
+# `unidata_version` 15.1.0, and `unicodedata.decomposition()` returns nothing for
+# a Hangul syllable on the first and `1100 1161` on the second: same table, two
+# implementations of it. So the two pins here are not redundant and neither
+# substitutes for the other - **the version field catches a drifted table and the
+# digest catches a drifted implementation of the same table.** That is why every
+# ref below carries both, and why host mode, which has neither, prints
+# `unpinned`. See notes/suite/CONTAINERS.md section 8.1, where `text` found this
+# by measuring four interpreters; the exclusion it cost this differential is
+# gone, in the commit that deleted it.
 #
 # Raising a pin is deliberate. A new reference version is new answers, and new
 # answers that disagree are findings rather than regressions - see the triage
