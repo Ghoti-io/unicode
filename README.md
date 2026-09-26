@@ -78,10 +78,10 @@ make test
 sudo make install
 ```
 
-From the workspace, which installs cutil first:
+From the parent of a suite checkout, which installs cutil first:
 
 ```bash
-./bootstrap.sh
+./suite/install.sh
 export PKG_CONFIG_PATH="$PWD/.local/share/pkgconfig"
 make -C libs/unicode test PREFIX="$PWD/.local"
 ```

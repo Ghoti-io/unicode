@@ -16,11 +16,10 @@ whichever interpreter happened to run the tool - and this library was paying for
 it in a triage list of disagreements that were all the reference being two
 Unicode releases behind the tables it was checking.
 
-The fix is a process boundary, not a faster loop. `notes/suite/CONTAINERS.md`
-measured the same move in `regex` and found the subprocess *faster* than
-in-process on the host (0.97s against 1.16s over 120,000 cases) and 0.7s slower
-containerised: what makes a differential slow is a process per *case*, and this
-is a process per *run*.
+The fix is a process boundary, not a faster loop. The same move in `regex`
+was *faster* than in-process on the host (0.97s against 1.16s over 120,000
+cases) and 0.7s slower containerised: what makes a differential slow is a
+process per *case*, and this is a process per *run*.
 
 Protocol. One request per line on stdin, each the name of a property. For each,
 one framed answer on stdout:

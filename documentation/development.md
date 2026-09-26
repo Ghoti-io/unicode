@@ -124,8 +124,7 @@ to `import unicodedata` in its own process, which meant "the reference" was
 whichever CPython ran it - and on this machine that is 3.13, two Unicode releases
 behind these tables. Every disagreement it reported was that skew. The reference
 is now `unicodedata_ask.py` run in an image pinned by digest in
-`tools/oracle/containers/IMAGES`, through the pattern `notes/suite/CONTAINERS.md`
-describes, and against a pin carrying UCD 17.0.0 there are **no differences at
+`tools/oracle/containers/IMAGES`. Against a pin carrying UCD 17.0.0 there are **no differences at
 all** over 7,958,585 comparisons, and nothing reported as not comparable.
 
 Three rules the pattern is built on, and each has been observed to hold:
@@ -191,9 +190,8 @@ Why the last one is not optional: the explainer's guard suite is a **floor**.
 Its cases are ones somebody thought of, and it caught the defect it caught
 because that defect happened to share a shape with a case already written. A
 divergence nobody imagined walks straight through it. `--exhaustive` is the only
-mode that can finish the question, and it is affordable for the reason
-`notes/suite/CONTAINERS.md` §2.7 gives: once the per-case process cost is gone,
-the oracle answers about 20,000 requests a second.
+mode that can finish the question, and it is affordable once the per-case
+process cost is gone: the oracle answers about 20,000 requests a second.
 
 Both sides of the comparison speak one protocol - one request per line, one
 framed answer per line, **the answer echoing the request** - so `testSegment`

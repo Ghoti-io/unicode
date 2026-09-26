@@ -23,7 +23,7 @@ all: Debian 13 gives CPython 3.13 and UCD 15.1 where these tables are 17.0.0,
 and the entire triage list this header used to carry was that skew rather than
 any defect. The reference is now `unicodedata_ask.py` run through
 `oracle_env.command()`, in an image pinned by digest in
-`containers/IMAGES` - the suite-wide pattern from `notes/suite/CONTAINERS.md`.
+`containers/IMAGES`.
 
 Two pins, and the difference between them is the point:
 
@@ -210,8 +210,7 @@ def ask_oracle(properties, scratch=None):
     digest in `containers/IMAGES`.
 
     One process for the whole run, not one per property and emphatically not one
-    per codepoint. `notes/suite/CONTAINERS.md` measures what that costs: about
-    200ms for the engine, paid once.
+    per codepoint. Starting the engine costs about 200ms, paid once.
 
     The frame header carries the property's name and an exact line count, and
     both are checked. A parent that loses sync with this child would not notice

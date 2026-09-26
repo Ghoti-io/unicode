@@ -18,12 +18,11 @@
 # ICU 78.3 is in Debian sid as 78.3-2 and installing it from there was the
 # cheap option. It is the wrong option for this particular gate. sid moves
 # continuously, so an exact apt pin into it expires sooner than a stable one
-# would - and CONTAINERS.md section 2.6 already reasons that out for vim: a
-# version-pinned apt install eventually fails to resolve, while a source
-# release has no expiry. This is the one gate here whose disagreement means a
-# defect, so an expiring pin is the worst place to put it.
+# would. A version-pinned apt install eventually fails to resolve, while a
+# source release has no expiry. This is the one gate here whose disagreement
+# means a defect, so an expiring pin is the worst place to put it.
 #
-# What is pinned, per section 2.6's two-part rule for a built-here image:
+# What is pinned, for a built-here image:
 #
 #   - the base, by digest
 #   - the source tarball, by the **SHA-512 the Unicode Consortium publishes**

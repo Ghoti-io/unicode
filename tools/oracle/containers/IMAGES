@@ -19,9 +19,8 @@
 # substitutes for the other - **the version field catches a drifted table and the
 # digest catches a drifted implementation of the same table.** That is why every
 # ref below carries both, and why host mode, which has neither, prints
-# `unpinned`. See notes/suite/CONTAINERS.md section 8.1, where `text` found this
-# by measuring four interpreters; the exclusion it cost this differential is
-# gone, in the commit that deleted it.
+# `unpinned`. `text` found this by measuring four interpreters; the exclusion
+# it cost this differential is gone, in the commit that deleted it.
 #
 # Raising a pin is deliberate. A new reference version is new answers, and new
 # answers that disagree are findings rather than regressions - see the triage

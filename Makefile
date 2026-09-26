@@ -150,7 +150,6 @@ else ifeq ($(findstring MINGW32_NT,$(UNAME_S)),MINGW32_NT)  # 32-bit Windows
 
 # TODO(windows): the Windows branches in this file were adapted from image's
 # and have never been run, nor has GUNI_API's dllexport/dllimport switching.
-# See WINDOWS-TODO.md item 6.
 else ifeq ($(findstring MINGW64_NT,$(UNAME_S)),MINGW64_NT)  # 64-bit Windows
 	OS_NAME := Windows
 	LIB_EXTENSION := dll
@@ -906,8 +905,7 @@ install-conformance: ucd-present
 ####################################################################
 #
 # The conformance files are the authority and they run in `make test`. An
-# oracle is a second opinion, and the pattern here is the suite-wide one in
-# notes/suite/CONTAINERS.md - this library is the first to land it.
+# oracle is a second opinion. This library is the first to land the pattern.
 #
 # ORACLE_MODE decides where a reference runs and reaches the tools through the
 # environment; tools/oracle/oracle_env.py is the only place that knows how to
@@ -1023,7 +1021,7 @@ oracle-images:
 	case "$$tag" in \
 		*$(ORACLE_IMAGE_PREFIX)*) ;; \
 		*) printf "IMAGES names the icu image %s, which is not under the\n" "$$tag" >&2; \
-		   printf "convention's prefix %s (CONTAINERS.md 6.1). A library that\n" "$(ORACLE_IMAGE_PREFIX)" >&2; \
+		   printf "convention's prefix %s. A library that\n" "$(ORACLE_IMAGE_PREFIX)" >&2; \
 		   printf "names its image outside the prefix is one oracle-clean will\n" >&2; \
 		   printf "refuse to remove, so the two must agree.\n" >&2; \
 		   exit 1 ;; \
@@ -1032,7 +1030,7 @@ oracle-images:
 		-f tools/oracle/containers/icu/Dockerfile \
 		tools/oracle/containers/icu
 
-# The naming convention is notes/suite/CONTAINERS.md section 6.1:
+# The naming convention:
 #
 #   ghoti-<library>-oracle-<reference>:<version>   a library's oracle images
 #   ghoti-<purpose>:<base-or-version>              suite-wide toolchains

@@ -10,8 +10,8 @@
 # published by the Free Software Foundation.
 """How an oracle is spelled, so that no tool here spells one itself.
 
-The pattern and most of this text come from the suite-wide exploration in
-`notes/suite/CONTAINERS.md`; this library is the first to land it. What it
+The pattern and most of this text come from the same exploration the other
+libraries adopted; this library is the first to land it. What it
 solves here is narrower than in `regex` and sharper:
 `tools/oracle/unicodedata_diff.py` used to `import unicodedata` in its own
 process, so "the reference" was whichever CPython ran the tool. That is the
@@ -240,14 +240,13 @@ def version(name):
 def check_pin(name):
     """Raise unless the reference's version matches containers/IMAGES.
 
-    **Container mode only, and that is a departure** from the pattern in
-    `notes/suite/CONTAINERS.md`, which runs this check in both modes. The
-    reason it gives for both is that an image *built here* cannot be pinned by
-    digest, so the run-time version check is the only guarantee it has. Every
-    image this library names is a stock one pinned by digest, so that reason
-    does not apply - and applying the check anyway makes host mode a dead end
-    rather than an escape hatch, because this machine's CPython is 3.13 and no
-    pin worth having names 3.13.
+    **Container mode only, and that is a departure** from running this check in
+    both modes. The reason for both is that an image *built here* cannot be
+    pinned by digest, so the run-time version check is the only guarantee it
+    has. Every image this library names is a stock one pinned by digest, so
+    that reason does not apply - and applying the check anyway makes host mode
+    a dead end rather than an escape hatch, because this machine's CPython is
+    3.13 and no pin worth having names 3.13.
 
     Host mode therefore reports rather than asserts, and says `unpinned` in the
     line it prints, which is the claim it is actually entitled to make. The

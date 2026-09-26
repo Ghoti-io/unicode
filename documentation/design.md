@@ -63,7 +63,7 @@ five are this suite's own; the rest are the field's.
 
 | # | The mistake | Where it happened | What `unicode` does instead |
 | --- | --- | --- | --- |
-| M1 | The same tables generated three times by three libraries, from three generators, with three version pins nothing checks | This suite: `regex` and `text` at UCD 17.0.0 by coincidence, `font` about to be the third | One generator, one pin, one committed output, and a suite-level check that every `UCD_VERSION` file agrees (§5.4) |
+| M1 | The same tables generated three times by three libraries, from three generators, with three version pins nothing checks | This suite: `regex` and `text` at UCD 17.0.0 by coincidence, `font` about to be the third | One generator, one pin, one committed output, and the version is queryable (§5.4) |
 | M2 | A tailoring decision baked into a shared table at generation time | `regex`'s generator applies UAX #14's LB1 while generating: `CJ` becomes `NS`, so `line-break: loose` is unreachable and a layout engine cannot ask for it | Tables carry the unresolved classes; LB1 is a function the caller applies with a policy, and the policy is the whole CSS `line-break` property rather than LB1's binary choice (§7.3) |
 | M3 | A UTF-16 API, so every UTF-8 program converts on the way in and out | ICU's `u_*` functions; `ctang`'s `u_strFromUTF8`/`u_strToUTF8` are half its ICU call sites | UTF-8 is the primary encoding; boundaries are byte offsets; a codepoint-array entry point stands beside it, and no UTF-16 API exists (§4.1) |
 | M4 | A conformance gate that skips when its data is absent, with no second gate | `regex`'s `test_break.cpp` skips without `third_party/ucd/`; defensible there because the Perl differential also exists, indefensible for a shared owner | The conformance files are committed; the gate cannot skip (§12.2) |
@@ -324,10 +324,6 @@ case is the bug.
 as a string and `guni_ucd_version_number()` as `GUNI_MAKE_VERSION(17, 0, 0)`,
 so that a consumer can log which Unicode version classified a string. That is
 an audit answer, for the same reason `chron`'s tzdata version is one.
-
-The suite-level check: `tools/check-ucd-pins.sh` in the workspace reads every
-`UCD_VERSION` in every library that has one and fails if they differ. Today
-that is `regex`, `text` and this library.
 
 ### 5.5 Upgrading Unicode
 
@@ -787,8 +783,7 @@ Every gate here has been *observed to fail* before it is trusted, per `chron`
 
 ### 12.4 The oracles run in containers
 
-`notes/suite/CONTAINERS.md` §2 and §4 record the pattern, prototyped and
-measured on `regex`; **this library is the first to land it**, and adopts it
+The pattern was prototyped and measured on `regex`; **this library is the first to land it**, and adopts it
 rather than inventing a second one: `tools/oracle/containers/IMAGES` pins every reference
 (stock images by digest, built-here images by every input they read plus a
 run-time version check); `tools/oracle/oracle_env.py` is the one place a
@@ -900,7 +895,7 @@ Two things are specific to Unicode oracles:
   it expires sooner than a stable one would, and this is the one gate whose
   disagreement means a defect. What is pinned is the base by digest and the
   tarball by the SHA-512 the Consortium publishes beside the release - the bytes
-  rather than a tag - plus the run-time version check, per CONTAINERS.md §2.6.
+  rather than a tag - plus the run-time version check.
 
   **Six divergences from ICU, all measured and all explained.** In the order
   they were found, with the differential's own guard suite (`--self-test-only`,
@@ -1139,4 +1134,3 @@ author and answered on 2026-09-24; the rest stand as recommended.
 - `libs/chron/documentation/design.md` §3.7 (zero refuses), §8.5 (providers),
   §8.6 (output contract), §12.3 (gates observed to fail), §14 (no CLDR).
 - `libs/regex/src/unicode/` and `tools/unicode/`, the code that moves.
-- `notes/suite/UNICODE-LIBRARY.md`, the decision record.
