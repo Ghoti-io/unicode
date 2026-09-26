@@ -21,15 +21,15 @@
 /**
  * @file
  *
- * UAX #44 character names: **tier 1**.
+ * UAX #44 character names.
  *
- * This is the only header in the library that is not tier 0, and the split is
- * about size rather than dependencies (design.md section 3). The name tables
- * are 37,610 lines of generated C - more than half the generated bulk of
+ * The umbrella header does not include this one. The split is about size
+ * rather than dependencies (design.md section 3). The name tables are
+ * 37,610 lines of generated C - more than half the generated bulk of
  * everything here - and one consumer has ever wanted them: `regex`, for
- * `\N{...}`. Nothing in tier 0 includes this header, and `make check-layering`
- * fails naming the file if that changes, so a consumer of a grapheme iterator
- * does not link the names.
+ * `\N{...}`. Nothing else in the library includes this header, and
+ * `make check-layering` fails naming the file if that changes, so a
+ * consumer of a grapheme iterator does not link the names.
  *
  * What is here: the names, including the **algorithmic** ones a table would be
  * absurd for (`HANGUL SYLLABLE GAG` alone would cost 11,172 rows); the five

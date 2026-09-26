@@ -1,31 +1,20 @@
-# The design of ghoti.io-unicode
+# Design
 
-**Status:** phases A, B and C are built - every module in §3.1, both tiers,
-the generator, the exhaustive sweep, and the conformance gates for
-normalisation, bidi and all four segmentations. What is left is the
-migrations, D to F, and they are the consumers' own commits. This page
-says what will exist and why, so that the code can be judged against it
-rather than the other way round. A change of mind lands here first, in the
-same commit as the code that needs it (`CONVENTIONS.md` §9), and §16 marks
-what is built. §17 lists what the code decided differently from this page,
-and why. The workspace's `notes/suite/UNICODE-LIBRARY.md` records the
-decision to build this library and the inventory that motivated it.
+This page is the design: the modules, the rules, and why they are shaped
+that way. The behaviour it describes is what the library implements.
 
 `unicode` is the suite's Unicode library: the Character Database as generated
 tables, and the algorithms the Unicode Standard Annexes define over them -
 normalisation, segmentation, line breaking, bidirectional ordering, case
-mapping, and the properties a shaper needs. It exists because three libraries
-here need this and two of them have already written it: `regex` carries a
-full UAX #29 and UAX #14 implementation and 54,736 lines of generated tables;
-`text` carries NFC and 7,341 lines of its own; `ctang` links ICU to get one
-grapheme-cluster iterator; and `font`, the next library, would be the third
-copy. The full inventory is in `notes/suite/UNICODE-LIBRARY.md` §1.
+mapping, and the properties a shaper needs. It exists so the rest of the suite shares one copy of those tables and
+algorithms. `text` links it. `regex` still carries its own tables for the
+properties a pattern needs, and `ctang` still links ICU for one
+grapheme-cluster iterator.
 
 The prefix is `GUNI_` / `guni_`. The package is `ghoti.io-unicode-0`, the
 include path `<ghoti.io/unicode/...>`. The include path sits beside ICU's
-`<unicode/...>` in any file that has both, which `ctang` will until §16 phase
-F; the `ghoti.io/` component keeps them apart at compile time and a reader has
-to be told.
+`<unicode/...>` in any file that also includes ICU; the `ghoti.io/`
+component keeps them apart at compile time.
 
 ---
 
@@ -39,7 +28,7 @@ and that no future library here has to write again. Each word is a mechanism:
 | Property | Mechanism |
 | --- | --- |
 | **Correct** | Every table is generated from the Unicode Character Database at a pinned version, never typed (§5). Every algorithm is one the Standard specifies in a numbered annex and publishes a conformance file for, and that file is the gate (§12). Every property answer is checked **exhaustively** - all 1,114,112 codepoints - against a second source, not sampled (§12.1). |
-| **Cross-platform** | Tier 0 (§3) touches no operating-system API, reads no locale, opens no file. It is pure functions over integers and bytes and behaves identically everywhere by construction. There is no tier that touches the OS at all. |
+| **Cross-platform** | The library touches no operating-system API, reads no locale, opens no file. It is pure functions over integers and bytes and behaves identically everywhere by construction. |
 | **Dependency-free** | The only link dependency is `cutil`, for the allocator vtable, checked size arithmetic, and UTF-8/UTF-16 conversion. ICU is an *oracle* in the tests and is never linked (§12). CLDR is not shipped, not fetched, not read (§2 M6, §9). |
 | **Enterprise-ready** | No global state, no `setlocale`, no environment read (§3.6). Every function is reentrant over immutable `const` tables (§13.3). The data that answered a question is queryable - `guni_ucd_version()` - because "which Unicode version classified this string" is an audit question (§5.4). Symbols are namespaced per `CONVENTIONS.md` §4, so two versions can be loaded in one process. |
 | **Useful** | Three consumers exist today and their exact needs are enumerated in §11, with a fourth (`font`) designed against it. Both call shapes each consumer uses - set-oriented for a regex compiler, point-oriented for a shaper - come from one generator and are proven to agree (§4.2). |
@@ -88,44 +77,44 @@ five are this suite's own; the rest are the field's.
 | M12 | Enum values renumbered between data versions, so a stored property value changes meaning | Any library whose script enum is regenerated from a sorted list | Generated enums append and never renumber; the committed diff on upgrade is the review artifact (§5.5) |
 | M13 | Case mapping that is context-free when the Standard says it is not | `toupper('ß')` → `ß`; final sigma handled nowhere; Turkish `i` handled by locale side-effect | Full mappings with `SpecialCasing` conditions, context passed explicitly, and the three language-sensitive cases as an enum argument - which is UCD data, not CLDR (§8) |
 | M14 | Line breaking that claims to handle Thai | UAX #14 assigns class `SA` and says "use a dictionary"; libraries that resolve `SA` to `AL` and say nothing | `SA` runs go to a provider; without one there is no interior break, and the header says so in those words (§9.1) |
-| M15 | A "compatibility" character name lookup that cannot find `LATIN SMALL LETTER A` because of a hyphen | Implementations ignoring UAX #44-LM2 | Loose matching per UAX #44, as `regex` already does; kept in the tier-1 module (§10) |
-| M16 | Half a megabyte of character names linked by a program that wanted a grapheme iterator | Any monolithic Unicode library | Tiers (§3): names are tier 1, in their own translation units, behind their own header, and `make check-layering` keeps tier 0 from reaching them |
+| M15 | A "compatibility" character name lookup that cannot find `LATIN SMALL LETTER A` because of a hyphen | Implementations ignoring UAX #44-LM2 | Loose matching per UAX #44, as `regex` already does; the lookup is in `name.h` (§10) |
+| M16 | Half a megabyte of character names linked by a program that wanted a grapheme iterator | Any monolithic Unicode library | Names live in their own translation units, behind `name.h`, and the umbrella header does not include it. `make check-layering` fails if anything else does (§3) |
 
 ---
 
-## 3. Tiers and modules
+## 3. Modules
 
-Two tiers, split by what a consumer pays for. **Nothing in tier 0 includes a
-tier-1 header**, and `make check-layering` greps for it and fails naming the
-file, as `chron` does.
+Character names are the one module the umbrella header does not include.
+**Nothing else includes `name.h`**, and `make check-layering` greps for it
+and fails naming the file, as `chron` does.
 
-| Tier | Holds | Needs | Consumers |
+| Module | Holds | Needs | Who uses it |
 | --- | --- | --- | --- |
-| 0 | every property, every algorithm | nothing: no OS, no file, no locale | `text`, `regex`, `font`, `ctang` |
-| 1 | character names, aliases, named sequences | nothing either - the split is about *size*, not dependencies | `regex` |
+| Everything except names | every property, every algorithm | nothing: no OS, no file, no locale | `text`, `regex`, `font`, `ctang` |
+| `name.h` | character names, aliases, named sequences | nothing either - the split is about *size*, not dependencies | `regex` |
 
-Tier 1 exists because `tables_names.c` is 31,603 lines, more than half the
-generated bulk of everything being consolidated, and only `regex` has ever
-wanted it. In a shared library everything ships, and demand-paged `.rodata`
-means untouched tables cost address space rather than memory - but the split
-is still worth enforcing, because the next consumer who *does* want names
-should find them behind a header and not woven through `char.h`.
+`tables_names.c` is 31,603 lines, more than half the generated bulk of
+everything being consolidated, and only `regex` has ever wanted it. In a
+shared library everything ships, and demand-paged `.rodata` means untouched
+tables cost address space rather than memory - but the split is still worth
+enforcing, because the next consumer who *does* want names should find them
+behind a header and not woven through `char.h`.
 
 ### 3.1 The modules
 
-| Header | Module | Holds | Tier |
-| --- | --- | --- | :-: |
-| `core.h` | core | `GUNI_Result`, `GUNI_Limits`, the version query, `GUNI_Error` | 0 |
-| `utf.h` | encoding | UTF-8 decode/encode with the `GUNI_Invalid` policy; codepoint iteration; what `cutil`'s `utf.h` does not cover | 0 |
-| `char.h` | properties | general category, script, `Script_Extensions`, canonical combining class, East Asian Width, block, numeric type and value, the binary properties (`Alphabetic`, `White_Space`, `Extended_Pictographic`, ...), `Bidi_Class`, `Bidi_Mirrored` and the mirror, `Joining_Type`, `Joining_Group`, `Indic_Syllabic_Category`, `Indic_Positional_Category`, `Indic_Conjunct_Break`, `Vertical_Orientation`, the emoji properties, `Hangul_Syllable_Type`, `Line_Break` (unresolved), the four segmentation properties, decomposition type | 0 |
-| `set.h` | sets | the same properties as **range lists** for a regex compiler: "every codepoint whose script is Greek"; property-name and value-name lookup with UAX #44 loose matching | 0 |
-| `script.h` | script runs | script-run segmentation with `Script_Extensions` and paired-bracket handling: UTS #39's notion, which is also a shaper's itemiser | 0 |
-| `case.h` | case | simple and full upper, lower, title, fold; `SpecialCasing` conditions; the fold orbits `regex` needs for case-insensitive classes | 0 |
-| `norm.h` | normalisation | NFC, NFD, NFKC, NFKD; the quick-check properties; canonical ordering; Hangul composition and decomposition by algorithm | 0 |
-| `break.h` | segmentation | UAX #29 grapheme, word and sentence boundaries; UAX #14 line-break opportunities with LB1 exposed; point query and iterator forms; the `SA` provider seam | 0 |
-| `bidi.h` | bidirectional | UAX #9: paragraph level, resolved embedding levels, isolates, line reordering, mirroring | 0 |
-| `name.h` | names | UAX #44 character names including the algorithmic ones, name aliases, named sequences; name → codepoint with loose matching | **1** |
-| `unicode.h` | umbrella | everything in tier 0 | 0 |
+| Header | Module | Holds |
+| --- | --- | --- |
+| `core.h` | core | `GUNI_Result`, `GUNI_Limits`, the version query, `GUNI_Error` |
+| `utf.h` | encoding | UTF-8 decode/encode with the `GUNI_Invalid` policy; codepoint iteration; what `cutil`'s `utf.h` does not cover |
+| `char.h` | properties | general category, script, `Script_Extensions`, canonical combining class, East Asian Width, block, numeric type and value, the binary properties (`Alphabetic`, `White_Space`, `Extended_Pictographic`, ...), `Bidi_Class`, `Bidi_Mirrored` and the mirror, `Joining_Type`, `Joining_Group`, `Indic_Syllabic_Category`, `Indic_Positional_Category`, `Indic_Conjunct_Break`, `Vertical_Orientation`, the emoji properties, `Hangul_Syllable_Type`, `Line_Break` (unresolved), the four segmentation properties, decomposition type |
+| `set.h` | sets | the same properties as **range lists** for a regex compiler: "every codepoint whose script is Greek"; property-name and value-name lookup with UAX #44 loose matching |
+| `script.h` | script runs | script-run segmentation with `Script_Extensions` and paired-bracket handling: UTS #39's notion, which is also a shaper's itemiser |
+| `case.h` | case | simple and full upper, lower, title, fold; `SpecialCasing` conditions; the fold orbits `regex` needs for case-insensitive classes |
+| `norm.h` | normalisation | NFC, NFD, NFKC, NFKD; the quick-check properties; canonical ordering; Hangul composition and decomposition by algorithm |
+| `break.h` | segmentation | UAX #29 grapheme, word and sentence boundaries; UAX #14 line-break opportunities with LB1 exposed; point query and iterator forms; the `SA` provider seam |
+| `bidi.h` | bidirectional | UAX #9: paragraph level, resolved embedding levels, isolates, line reordering, mirroring |
+| `name.h` | names | UAX #44 character names including the algorithmic ones, name aliases, named sequences; name → codepoint with loose matching. Not included by the umbrella |
+| `unicode.h` | umbrella | every module except `name.h` |
 
 `vim_class.c` and the ECMAScript legacy case rules stay in `regex`: they are
 dialect features that happen to consume Unicode data, not Unicode services.
@@ -248,7 +237,7 @@ size a buffer from without a preflight call.
 
 Functions over single codepoints - every property, every simple case mapping,
 the mirror - are pure, take no allocator, touch no buffer, and cannot fail.
-This is most of the library, and it is what makes tier 0 usable from a signal
+This is most of the library, and it is what makes those functions usable from a signal
 handler or a JIT's runtime, should either ever want it.
 
 ### 4.6 Results
@@ -338,8 +327,7 @@ an audit answer, for the same reason `chron`'s tzdata version is one.
 
 The suite-level check: `tools/check-ucd-pins.sh` in the workspace reads every
 `UCD_VERSION` in every library that has one and fails if they differ. Today
-that is `regex` and `text`; after §16 it is this library alone and the check is
-trivially true, which is the point.
+that is `regex`, `text` and this library.
 
 ### 5.5 Upgrading Unicode
 
@@ -388,8 +376,7 @@ the composite.
 ### 6.2 Quick check
 
 The `NFC_QC`, `NFD_QC`, `NFKC_QC` and `NFKD_QC` properties are exposed as
-`guni_norm_quick_check(form, text)` returning `YES`, `NO` or `MAYBE` per UAX
-#15 §9, so that a caller can skip normalising text that is already normalised -
+`guni_norm_quick_check(form, text)` returning `YES`, `NO` or `MAYBE` per UAX #15 §9, so that a caller can skip normalising text that is already normalised -
 which is nearly all text. A `MAYBE` means the full algorithm runs; the function
 never guesses.
 
@@ -657,15 +644,14 @@ asked and a seam nobody fills is an API promise nobody tests.
 
 ---
 
-## 10. Names (tier 1)
+## 10. Names
 
 UAX #44 character names, including the algorithmically derived ones (Hangul
 syllables by the Jamo short names, CJK unified ideographs and Tangut by
 codepoint), name aliases in all five kinds, named sequences, and the reverse
 lookup with UAX #44-LM2 loose matching. In its own translation units behind
-`name.h`, tier 1, and nothing in tier 0 includes it -
-`make check-layering` reports the file counts of both tiers so that a run says
-what it checked rather than only what it forbade.
+`name.h`, and nothing else includes it. `make check-layering` reports what
+it checked rather than only what it forbade.
 
 **What it costs, measured.** 18,457 distinct words and 162,649 tokens encode
 40,951 names that are 1,044,804 bytes as text: a token is a word number in
@@ -775,13 +761,9 @@ GUNI_SWEEP_DUMP=Script build/linux/release/apps/testSweep > /tmp/ours
 diff /tmp/oracle /tmp/ours
 ```
 
-This is also the machinery that makes migrating `regex` and `text` safe (§16
-phases D and E): before either migration, the sweep is run against *their*
-implementations and the sums committed; after, the sums must match.
-
-This is the machinery that makes migrating `regex` and `text` safe (§16
-phases D and E): before either migration, the sweep is run against *their*
-implementations and the sums committed; after, the sums must match.
+This is also the machinery that makes a migration safe: before a consumer
+drops its own tables, the sweep is run against that implementation and the
+sums committed; after, the sums must match.
 
 ### 12.2 The gates cannot skip
 
@@ -999,18 +981,18 @@ Beyond the vectors, invariants checked over random input:
 ```
 include/ghoti.io/unicode/
   macros.h  libver.h  libver_gen.h  namespace.h  allocator.h     (CONVENTIONS §4)
-  enums.h       every enumerated property value  GENERATED, COMMITTED         [tier 0]
-  core.h        GUNI_Result, GUNI_Limits, GUNI_Error, version                 [tier 0]
-  utf.h         decode/encode, GUNI_Invalid                                    [tier 0]
-  char.h        every per-codepoint property                                   [tier 0]
-  set.h         properties as GUNI_Range lists; name/value lookup              [tier 0]
-  script.h      script-run segmentation                                        [tier 0]
-  case.h        mappings, conditions, tailorings, orbits                       [tier 0]
-  norm.h        the four forms, quick check, stream-safe                       [tier 0]
-  break.h       UAX #29 ×3, UAX #14, LB1, iterator, GUNI_BreakProvider         [tier 0]
-  bidi.h        UAX #9                                                         [tier 0]
-  name.h        UAX #44 names                                                  [tier 1]
-  unicode.h     umbrella for tier 0
+  enums.h       every enumerated property value  GENERATED, COMMITTED
+  core.h        GUNI_Result, GUNI_Limits, GUNI_Error, version
+  utf.h         decode/encode, GUNI_Invalid
+  char.h        every per-codepoint property
+  set.h         properties as GUNI_Range lists; name/value lookup
+  script.h      script-run segmentation
+  case.h        mappings, conditions, tailorings, orbits
+  norm.h        the four forms, quick check, stream-safe
+  break.h       UAX #29 ×3, UAX #14, LB1, iterator, GUNI_BreakProvider
+  bidi.h        UAX #9
+  name.h        UAX #44 names. Not included by the umbrella
+  unicode.h     umbrella for every module except name.h
 src/
   core/  utf/  char/  set/  script/  case/  norm/  break/  bidi/  name/
     each with <module>_internal.h and tables/ where generated
@@ -1044,7 +1026,7 @@ storing the same correlations once per property.
 
 ### 13.1 Allocation
 
-Tier 0's property, case-simple, mirror and quick-check functions allocate
+Property, case-simple, mirror and quick-check functions allocate
 nothing and take no allocator. Normalisation, full case mapping and bidi
 write to caller buffers (§4.5). The one place an allocator appears is the
 `_with_allocator` variant of the bidi resolver for paragraphs longer than a
@@ -1093,7 +1075,7 @@ author and answered on 2026-09-24; the rest stand as recommended.
    an API designed against one consumer is the wrong API.
 2. **`unicode` is the name.** Decided, with the ICU-adjacency caveat in the
    preamble. `ucd` would undersell a library that holds algorithms.
-3. **Names move, as tier 1.** Decided. The alternative leaves 31,603 lines in
+3. **Names are their own header.** Decided. The alternative leaves 31,603 lines in
    `regex` for the next consumer to write again.
 4. **IDNA and UTS #46 stay in `text`.** Recommended. A Unicode standard, but
    about host names, and one consumer is not a library. Revisit on a second.
@@ -1142,134 +1124,6 @@ author and answered on 2026-09-24; the rest stand as recommended.
 
 ---
 
-## 16. Plan
-
-Phases, in dependency order, with the milestone each unlocks. Sizes follow
-`regex`'s `plan.md` and `chron`: S up to a week, M two to four, L four to
-eight, for one engineer who knows the suite. Phases A-C build the library;
-D-F migrate its consumers; nothing in `font` that needs Unicode starts before
-E. (`font`'s tiers 0 and 1 - file parsing, outlines, rasterisation - need no
-Unicode at all and can proceed in parallel from phase B onward; see
-`libs/font/documentation/design.md` §17.)
-
-**Phases A, B and C are built**, and **D landed on 2026-09-24** - `text` is
-the first consumer, migrated by its own session. Its installed library now links
-`libghoti.io-unicode-0` and imports ten symbols across four of these headers:
-`guni_normalize` (`norm.h`); `guni_general_category`, `guni_combining_class`,
-`guni_bidi_class`, `guni_script`, `guni_joining_type` and `guni_has_property`
-(`char.h`); `guni_utf8_to_codepoints` and `guni_utf8_from_codepoints` (`utf.h`);
-`guni_limits_default` (`core.h`). Its `nfc_tables.c` is gone and `nfc.c` and
-`nfc_utf8.c` are adapters - 254 and 213 lines became 73 and 131.
-
-That is U4, and the part of it that matters to this library is the part the plan
-named: **the API has survived a second consumer.** It was designed against three
-and shaped by one, and the first migration reached four headers rather than the
-one `norm.h` a normalisation consumer might have needed - `guni_has_property`
-and `guni_joining_type` are IDNA's validity checks, which is exactly what the
-phase D row predicted. No header, signature or contract changed to let it in.
-
-The phases were built in five commits, each of which builds and
-passes `make test`. What the three of them came to:
-
-| | A | B | C |
-| --- | --- | --- | --- |
-| Modules | `utf`, `char`, `set` | `norm`, `bidi` | `break`, `case`, `script`, `name` |
-| Conformance files | - | 3 | 4 |
-| Tests | 50 | 99 | 148 in 15 binaries |
-| Fuzz harnesses | 1 | 3 | 6 |
-
-And the whole of it, at the end of C: 13,102 lines of code and 64,170 lines
-of generated tables, 99.0% line coverage, clean under Valgrind and ASan from
-an empty build directory, serially and under `-j8`. Today, with the oracles
-and CSS `line-break` on top, it is 13,591 lines of code, 150 tests in the same
-15 binaries, and the same 64,170 lines of tables - those have not moved since
-C and are byte-identical to it.
-
-Both code figures are `make cloc` over `src include tests Makefile`, summing
-C, C++, headers and the makefile, less the generated tables measured the same
-way:
-
-```
-cloc src include tests Makefile
-cloc $(find src include -path '*/tables/*' -type f)
-```
-
-The first revision of this paragraph said 11,571 and 65,689. The method was
-the same subtraction but the tables were overstated by 1,519 lines, so the
-code figure was under by exactly as much. Neither number reproduced, which is
-the only reason it was caught: a figure whose instrument is not written beside
-it cannot be checked, so the commands are here now.
-
-**`display.c` did not move, and the phase C row above no longer says it did.**
-It was listed as moving and never was. Measured rather than assumed: its table
-is vim 9.1's, from `strdisplaywidth()` over all 1,114,112 codepoints, and it is
-not East_Asian_Width. Against this library's `guni_east_asian_width()` it
-disagrees on **362 codepoints** - 198 vim draws in two cells that Unicode calls
-neither Wide nor Fullwidth (165 of them emoji, 31 C0 controls vim renders as
-`^X`), and 164 Unicode calls Wide or Fullwidth that vim does not draw in two -
-157 of them in one cell (145 `Other_Letter`, mostly Tangut and Khitan, where
-vim's table simply lags) and **7 in none at all**, the `Nonspacing_Mark`s at
-U+302A..302D, U+3099 and U+309A, which `display.c` line 166 gives zero cells.
-The first revision of this paragraph said all 164 were one cell, which is the
-hazard of naming a set by subtraction: the set was computed as "Wide and not
-two cells" and then described as "one cell", and a zero-cell entry satisfies
-the arithmetic while contradicting the words.
-Its zero-width column is a strict subset of `Mn | Me | Cf`, 2,033 of that
-property's 2,242 members, so it is not that property either.
-
-A table versioned by vim rather than by the UCD does not belong here: this
-library has one pin, `tools/ucd/UCD_VERSION`, `check-ucd-tables` gates every
-table by regenerating it from the UCD, and `tools/check-ucd-pins.sh` exists to
-prove three libraries agree on one Unicode version. A second data version
-inside the library defeats all three. The Unicode part of the question,
-East_Asian_Width, is here already; the vim part is a dialect feature and its
-home is still open - see `notes/suite/UNICODE-LIBRARY.md`.
-
-**What is deliberately not done**, from the phase rows below: the comparison of
-the sweep sums against `regex`'s own `property.c`, and the pairwise Line_Break
-sweep against a pre-move `regex` build. Both are differentials against a
-library that has not migrated yet, so both belong to phase E rather than ahead
-of it; the pairwise sweep's own artifact is committed and waiting for them
-(`tests/data/break/linebreak-pairs.txt`).
-
-**The oracle containers are built** (§12.4): `tools/oracle/oracle_env.py`,
-`oracle_run.py`, `containers/IMAGES` and `unicodedata_ask.py`, with
-`make check-oracle-unicodedata` against a released CPython and
-`make check-oracle-unicodedata-strict` against one carrying this library's own
-UCD version, where 7,958,585 comparisons over all 1,114,112 codepoints leave no
-difference at all. **The ICU differential from C's gate column is built too**, which was the last
-thing the image pattern was blocking: `tools/oracle/icu_break.cpp` compiled
-*inside* its image against ICU 78.3 alone - the `pcre2` shape in
-`notes/suite/CONTAINERS.md` §2.4. It gave segmentation its first second opinion
-of any kind, and it earned itself on the first run: `GUNI_LINE_BREAK_LOOSE`
-implements UAX #14's LB1 and the header claimed CSS's `loose`, which carries two
-tailorings beyond it (§12.4). Everything else agrees exactly.
-
-The suite-level `check-ucd-pins.sh` is built, in the workspace rather than
-here: three libraries pin a UCD version today and the point of the check is
-that they agree.
-
-| Phase | Work | Size | Gate | Unlocks |
-| --- | --- | --- | --- | --- |
-| **A** | Scaffold from `model` per `CONVENTIONS.md` §12; `core.h`, `utf.h`; `tools/ucd/` with `fetch.sh`, `gen_tables.py` (ported from `regex`), `UCD_VERSION`; the committed conformance files; `char.h` and `set.h` with their tables; the exhaustive sweep (§12.1) and the trie/range agreement test; `check-ucd-tables`, `check-layering`, `check-symbols`; the suite-level `check-ucd-pins.sh` | M | sweep sums match `regex`'s `property.c` for every property both have; every gate observed to fail once | **U1: a library exists that answers every property for every codepoint, provably identically to what `regex` answers today** |
-| **B** | The modules nobody has: `norm.h` in all four forms with quick-check and the expansion constants; `bidi.h`; the shaping properties in `char.h` (joining, Indic, USE inputs, emoji, vertical orientation, mirroring) | L | `NormalizationTest`, `BidiTest`, `BidiCharacterTest`, all committed, all passing; the sweep extended to the new properties | **U2: `font`'s shaping tier has every Unicode input it needs** |
-| **C** | Move `break.c`, `case.c`, `script_run.c` and `names.c` with their tables into `break.h`, `case.h`, `char.h`, `script.h`, `name.h`; **LB1 exposed** (§7.3); the iterator form; `GUNI_BreakProvider`; the pairwise Line_Break sweep against the pre-move `regex` build; `test_unicode.cpp` and `test_break.cpp` move here | M | the four UAX #29/#14 files; the pairwise sweep byte-identical under `STRICT`; the ICU differential | **U3: every algorithm `regex` had, with its tailoring axis opened** |
-| **D** ✅ | Migrate `text`: `nfc.c`, `nfc_utf8.c`, `nfc_tables.c` deleted; IDNA's validity checks read `char.h`; `workspace.txt` gains `unicode` on `text`'s line | S | `text`'s 1,534 tests unchanged; its NFC oracle script unchanged; the sweep sums for the composition tables unchanged | **U4: first consumer migrated; the API has survived a second consumer** |
-| **E** | Migrate `regex`: `src/unicode/` reduced to `vim_class.c` and the ECMAScript legacy rules; `regex` applies LB1 with `STRICT`; `\p{...}`, `\N{...}`, `\b{...}` and `(*sr:...)` over this library; `workspace.txt` updated | M | `regex`'s 484 tests and 33,829 vectors unchanged; the Perl differential unchanged; the pairwise sweep unchanged | **U5: the duplicate is gone; three libraries, one Unicode** |
-| **F** | `ctang`: `src/unicodeString.c` calls `guni_break_iter_*` for graphemes; the UTF-16 conversions and the ICU dependency removed; `workspace.txt` and the Makefile's dependency block updated | S | `ctang`'s 174 test executions unchanged; `pkg-config icu-uc` no longer required by any library | **U6: ICU is not linked by anything in the suite** |
-
-Each phase ends with `make test`, `test-valgrind`, `test-asan`, `fuzz` and
-`check-symbols` clean from an empty build directory, serially and under `-j`,
-per `CONVENTIONS.md` §12 item 10. D, E and F are each independently
-deferrable: nothing in a later phase depends on an earlier migration having
-landed, and old code is deleted only once the new path passes.
-
-**What is deliberately absent at the end of F:** everything in §14. The
-absent things are absent, not stubbed: there is no `guni_collate()` that
-returns `ERR_UNSUPPORTED`, because a function that exists and refuses is a
-promise the tests do not check.
-
----
 
 ## References
 

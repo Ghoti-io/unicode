@@ -21,10 +21,10 @@
 /**
  * @file
  *
- * Umbrella header for the Ghoti.io Unicode library: every tier-0 header.
- * A consumer that wants a higher tier includes that tier's header itself,
- * which is what keeps the tier boundary visible at the include line. See
- * documentation/design.md.
+ * Umbrella header for the Ghoti.io Unicode library. It includes every
+ * module except character names. Include `name.h` for those; the name
+ * tables are large, and a program that does not look up names does not
+ * link them. See documentation/design.md.
  */
 
 #ifndef GHOTI_IO_GUNI_UNICODE_H

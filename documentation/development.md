@@ -14,7 +14,7 @@ src/break/                  UAX #29 and UAX #14, with LB1 exposed
 src/bidi/                   UAX #9: levels, reordering, mirroring
 src/case/                   Case mapping, the conditions, the fold orbits
 src/script/                 UTS #39 script runs, and the shaper's itemiser
-src/name/                   TIER 1: the character names
+src/name/                   the character names (not included by the umbrella)
 src/unicode.c               The version
 
 Each module with generated tables keeps them under its own tables/ directory,
@@ -75,12 +75,11 @@ header first.
 
 ## Adding a module
 
-design.md section 3.1 names the modules and the tier each sits in. A module
-arrives with:
+design.md section 3.1 names the modules. A module arrives with:
 
-1. Its public header under `include/ghoti.io/unicode/`, listed in
-   `TIER0_FILES` (or a tier-1 list) in the Makefile, so that `check-layering`
-   places it. Every header includes `macros.h` first.
+1. Its public header under `include/ghoti.io/unicode/`, listed in the
+   Makefile so that `check-layering` places it. `name.h` stays off the
+   umbrella. Every header includes `macros.h` first.
 2. Its generated tables under `src/<module>/tables/`, emitted by
    `tools/ucd/gen_tables.py` and committed; `make check-ucd-tables` regenerates
    and fails on a byte difference.
