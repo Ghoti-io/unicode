@@ -49,6 +49,7 @@
 
 #include <ghoti.io/unicode/break.h>
 #include <string.h>
+#include "../char/tables/tables.h"
 
 // --------------------------------------------------------------------------
 // Property values
@@ -58,9 +59,13 @@
 // rule bodies read as the Standard writes them.
 // --------------------------------------------------------------------------
 
-/** Grapheme_Cluster_Break. */
+/**
+ * Grapheme_Cluster_Break, read from the record rather than through the
+ * exported accessor. The walk below does this once per codepoint, and a call
+ * out of this file was the cost that showed up on a long cluster.
+ */
 static uint32_t gcb_of(uint32_t codepoint) {
-  return (uint32_t)guni_grapheme_cluster_break(codepoint);
+  return guni_record(codepoint)->gcb;
 }
 
 /** Word_Break. */
@@ -168,6 +173,66 @@ struct GUNI_BreakText {
 typedef struct GUNI_BreakText Text;
 
 /**
+ * A well-formed sequence, decoded here. Returns 0 when the bytes are not a
+ * complete legal sequence; the caller then uses guni_utf8_decode(), which
+ * owns the maximal-subpart answer. The bit masks are Table 3-7 of the
+ * Standard, the same ones the decoder uses.
+ */
+static inline __attribute__((always_inline)) size_t decode_well_formed(
+    const unsigned char * bytes, size_t len,
+    uint32_t * out) {
+  unsigned char lead = bytes[0];
+  if (lead < 0xE0u) {
+    if (lead < 0xC2u || len < 2 || (bytes[1] & 0xC0u) != 0x80u) {
+      return 0;
+    }
+    *out = ((uint32_t)(lead & 0x1Fu) << 6) | (uint32_t)(bytes[1] & 0x3Fu);
+    return 2;
+  }
+  if (lead < 0xF0u) {
+    if (len < 3 || (bytes[1] & 0xC0u) != 0x80u || (bytes[2] & 0xC0u) != 0x80u) {
+      return 0;
+    }
+    if ((lead == 0xE0u && bytes[1] < 0xA0u) || (lead == 0xEDu && bytes[1] > 0x9Fu)) {
+      return 0;
+    }
+    *out = ((uint32_t)(lead & 0x0Fu) << 12)
+        | ((uint32_t)(bytes[1] & 0x3Fu) << 6)
+        | (uint32_t)(bytes[2] & 0x3Fu);
+    return 3;
+  }
+  if (lead < 0xF5u) {
+    if (len < 4 || (bytes[1] & 0xC0u) != 0x80u || (bytes[2] & 0xC0u) != 0x80u
+        || (bytes[3] & 0xC0u) != 0x80u) {
+      return 0;
+    }
+    if ((lead == 0xF0u && bytes[1] < 0x90u) || (lead == 0xF4u && bytes[1] > 0x8Fu)) {
+      return 0;
+    }
+    *out = ((uint32_t)(lead & 0x07u) << 18)
+        | ((uint32_t)(bytes[1] & 0x3Fu) << 12)
+        | ((uint32_t)(bytes[2] & 0x3Fu) << 6)
+        | (uint32_t)(bytes[3] & 0x3Fu);
+    return 4;
+  }
+  return 0;
+}
+
+/** Grapheme class of an ASCII byte. None of these are Extend, RI, or ZWJ. */
+static inline __attribute__((always_inline)) uint32_t ascii_gcb(unsigned char c) {
+  if (c == '\n') {
+    return GUNI_GCB_LF;
+  }
+  if (c == '\r') {
+    return GUNI_GCB_CR;
+  }
+  if (c < 0x20u || c == 0x7Fu) {
+    return GUNI_GCB_CONTROL;
+  }
+  return GUNI_GCB_OTHER;
+}
+
+/**
  * The codepoint beginning at `at`, and where the next one begins.
  *
  * A byte that does not begin a well-formed sequence is stepped over as one
@@ -175,8 +240,8 @@ typedef struct GUNI_BreakText Text;
  * the rules must terminate on any input, and refusing here would mean every
  * boundary query validated the whole buffer first.
  */
-static int at_next(const Text * text, size_t at, uint32_t * out,
-    size_t * out_end) {
+static inline __attribute__((always_inline)) int at_next(const Text * text, size_t at,
+    uint32_t * out, size_t * out_end) {
   if (at >= text->length) {
     return 0;
   }
@@ -184,6 +249,24 @@ static int at_next(const Text * text, size_t at, uint32_t * out,
     *out = text->codepoints[at];
     *out_end = at + 1;
     return 1;
+  }
+  /* An ASCII byte is a one-byte character. Spelling that here keeps the
+   * common case from calling out to the decoder. */
+  {
+    unsigned char lead = (unsigned char)text->utf8[at];
+    if (lead < 0x80u) {
+      *out = lead;
+      *out_end = at + 1;
+      return 1;
+    }
+    uint32_t codepoint = 0;
+    size_t width = decode_well_formed((const unsigned char *)text->utf8 + at,
+        text->length - at, &codepoint);
+    if (width != 0) {
+      *out = codepoint;
+      *out_end = at + width;
+      return 1;
+    }
   }
   bool valid = false;
   size_t width = guni_utf8_decode(text->utf8 + at, text->length - at, out,
@@ -208,6 +291,14 @@ static int at_prev(const Text * text, size_t at, uint32_t * out,
     *out = text->codepoints[at - 1];
     *out_start = at - 1;
     return 1;
+  }
+  {
+    unsigned char previous = (unsigned char)text->utf8[at - 1];
+    if (previous < 0x80u) {
+      *out = previous;
+      *out_start = at - 1;
+      return 1;
+    }
   }
   size_t start = guni_utf8_prev(text->utf8, at);
   bool valid = false;
@@ -296,12 +387,10 @@ static int pictographic_zwj_before(const Text * text, size_t at) {
   }
 }
 
-/** UAX #29 section 3.1.1, rules GB3 to GB999. `before` ends at `at`. */
-static int grapheme_break(const Text * text, size_t at, uint32_t before,
-    size_t before_start, uint32_t after) {
-  uint32_t left = gcb_of(before);
-  uint32_t right = gcb_of(after);
-
+/** UAX #29 section 3.1.1, rules GB3 to GB999. `left` ends at `at`. */
+static inline __attribute__((always_inline)) int grapheme_rules(const Text * text,
+    size_t at, size_t before_start,
+    uint32_t left, uint32_t after, uint32_t right) {
   if (left == GUNI_GCB_CR && right == GUNI_GCB_LF) {
     return 0; // GB3
   }
@@ -347,6 +436,13 @@ static int grapheme_break(const Text * text, size_t at, uint32_t before,
   }
 
   return 1; // GB999
+}
+
+/** The point query's entry: look the pair up, then apply the rules. */
+static int grapheme_break(const Text * text, size_t at, uint32_t before,
+    size_t before_start, uint32_t after) {
+  return grapheme_rules(text, at, before_start, gcb_of(before), after,
+      gcb_of(after));
 }
 
 // --------------------------------------------------------------------------
@@ -1684,6 +1780,147 @@ void guni_break_iter_init_codepoints(GUNI_BreakIter * iter,
   }
 }
 
+static int utf8_continuation(const Text * text, size_t position) {
+  return text->codepoints == NULL && position > 0 && position < text->length
+      && ((unsigned char)text->utf8[position] & 0xC0u) == 0x80u;
+}
+
+static inline __attribute__((always_inline)) void cluster_save(GUNI_BreakIter * iter,
+    size_t resume, size_t start,
+    uint32_t cp, uint32_t gcb) {
+  iter->cluster_resume = resume;
+  iter->cluster_start = start;
+  iter->cluster_cp = cp;
+  iter->cluster_gcb = gcb;
+  iter->cluster_ready = 1;
+}
+
+static inline __attribute__((always_inline)) int cluster_load(
+    const GUNI_BreakIter * iter, size_t position,
+    uint32_t * cp, uint32_t * gcb, size_t * start) {
+  if (!iter->cluster_ready || iter->cluster_resume != position) {
+    return 0;
+  }
+  *cp = iter->cluster_cp;
+  *gcb = iter->cluster_gcb;
+  *start = iter->cluster_start;
+  return 1;
+}
+
+/**
+ * The codepoint at `at`, its grapheme class, and where the next one begins.
+ *
+ * An ASCII byte takes its class from the byte. Nothing in ASCII is Extend,
+ * a regional indicator, or ZWJ, so the trie is not consulted.
+ */
+static inline __attribute__((always_inline)) int classify_at(const Text * text,
+    size_t at, uint32_t * cp,
+    uint32_t * gcb, size_t * end) {
+  if (at >= text->length) {
+    return 0;
+  }
+  if (text->codepoints == NULL) {
+    unsigned char lead = (unsigned char)text->utf8[at];
+    if (lead < 0x80u) {
+      *cp = lead;
+      *gcb = ascii_gcb(lead);
+      *end = at + 1;
+      return 1;
+    }
+  }
+  if (!at_next(text, at, cp, end) || *end <= at) {
+    return 0;
+  }
+  *gcb = gcb_of(*cp);
+  return 1;
+}
+
+/**
+ * The next grapheme boundary.
+ *
+ * The rules are still grapheme_rules(), which is what the point query
+ * applies, so a character boundary has one answer. The class of the
+ * codepoint just passed is kept on the iterator, and an ASCII byte is
+ * classified from the byte itself.
+ */
+static bool grapheme_iter_next(GUNI_BreakIter * iter, const Text * text,
+    size_t * position_out) {
+  while (iter->position <= text->length) {
+    size_t position = iter->position;
+
+    if (text->length == 0) {
+      iter->position = position + 1;
+      return false;
+    }
+    if (utf8_continuation(text, position)) {
+      iter->cluster_ready = 0;
+      iter->position = position + 1;
+      continue;
+    }
+    if (position == text->length) {
+      iter->position = position + 1;
+      *position_out = position;
+      return true;
+    }
+    if (position == 0) {
+      uint32_t cp = 0;
+      uint32_t gcb = 0;
+      size_t end = 0;
+      if (!classify_at(text, 0, &cp, &gcb, &end)) {
+        iter->position = 1;
+      }
+      else {
+        iter->position = end;
+        cluster_save(iter, end, 0, cp, gcb);
+      }
+      *position_out = 0;
+      return true;
+    }
+
+    uint32_t left_cp = 0;
+    uint32_t left = 0;
+    size_t left_start = 0;
+    if (!cluster_load(iter, position, &left_cp, &left, &left_start)) {
+      if (!at_prev(text, position, &left_cp, &left_start)) {
+        iter->position = position + 1;
+        continue;
+      }
+      left = (text->codepoints == NULL && left_cp < 0x80u)
+          ? ascii_gcb((unsigned char)left_cp)
+          : gcb_of(left_cp);
+    }
+
+    for (;;) {
+      uint32_t after = 0;
+      uint32_t right = 0;
+      size_t after_end = 0;
+      if (!classify_at(text, position, &after, &right, &after_end)) {
+        iter->position = position + 1;
+        iter->cluster_ready = 0;
+        break;
+      }
+      if (grapheme_rules(text, position, left_start, left, after, right)) {
+        iter->position = after_end;
+        cluster_save(iter, after_end, position, after, right);
+        *position_out = position;
+        return true;
+      }
+      left_cp = after;
+      left = right;
+      left_start = position;
+      position = after_end;
+      iter->position = position;
+      cluster_save(iter, position, left_start, left_cp, left);
+      if (position >= text->length) {
+        iter->position = text->length + 1;
+        *position_out = text->length;
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
 bool guni_break_iter_next(GUNI_BreakIter * iter, size_t * position_out) {
   if (iter == NULL || position_out == NULL) {
     return false;
@@ -1691,11 +1928,12 @@ bool guni_break_iter_next(GUNI_BreakIter * iter, size_t * position_out) {
   Text subject = make_text(&iter->options, iter->utf8, iter->codepoints,
       iter->length);
   GUNI_BreakKind kind = kind_of(&iter->options);
-  /* The iterator is the point query asked at each character boundary, so the
-   * two cannot disagree: there is one rule engine and this walks it. The
-   * design had it the other way round - the iterator as the primitive - and
-   * the reason it is this way is that the rules are written as "is there a
-   * boundary between these two characters", which is the point query. */
+  /* Word, sentence and line still ask the point query at each character
+   * boundary. Grapheme uses the same rules and keeps the previous class, so
+   * the two still cannot disagree; the repeated decode was the cost. */
+  if (kind == GUNI_BREAK_GRAPHEME) {
+    return grapheme_iter_next(iter, &subject, position_out);
+  }
   while (iter->position <= subject.length) {
     size_t position = iter->position;
     /* Advance to the next character boundary before answering, so that a
@@ -1721,6 +1959,112 @@ bool guni_break_iter_next(GUNI_BreakIter * iter, size_t * position_out) {
   return false;
 }
 
+/** True when every byte is printable ASCII, so each byte is its own grapheme. */
+static int plain_ascii(const unsigned char * bytes, size_t length)
+    __attribute__((noinline));
+
+static int plain_ascii(const unsigned char * bytes, size_t length) {
+  for (size_t i = 0; i < length; i++) {
+    unsigned char c = bytes[i];
+    if (c < 0x20u || c >= 0x7Fu) {
+      return 0;
+    }
+  }
+  return 1;
+}
+
+/** Boundaries of a plain ASCII string: 0, 1, ..., length. */
+static size_t fill_plain_ascii(size_t length, size_t * out, size_t cap,
+    int * overflow) __attribute__((noinline));
+
+static size_t fill_plain_ascii(size_t length, size_t * out, size_t cap,
+    int * overflow) {
+  size_t count = length + 1;
+  size_t limit = (count < cap) ? count : cap;
+  for (size_t i = 0; i < limit; i++) {
+    out[i] = i;
+  }
+  if (count > cap) {
+    *overflow = 1;
+  }
+  return count;
+}
+
+static size_t grapheme_fill(const char * text, size_t length, size_t * out,
+    size_t cap, int * overflow) __attribute__((noinline));
+
+static size_t grapheme_fill(const char * text, size_t length, size_t * out,
+    size_t cap, int * overflow) {
+  *overflow = 0;
+  if (length == 0 || text == NULL) {
+    return 0;
+  }
+  if (plain_ascii((const unsigned char *)text, length)) {
+    return fill_plain_ascii(length, out, cap, overflow);
+  }
+  Text subject = make_text(NULL, text, NULL, length);
+  const unsigned char * bytes = (const unsigned char *)text;
+  size_t count = 0;
+  size_t index = 0;
+  uint32_t left = 0;
+  size_t left_start = 0;
+
+#define GUNI_EMIT(pos) \
+  do { \
+    if (count < cap) { \
+      out[count] = (pos); \
+    } \
+    else { \
+      *overflow = 1; \
+    } \
+    count++; \
+  } while (0)
+
+  GUNI_EMIT(0);
+  {
+    uint32_t first = 0;
+    if (!classify_at(&subject, 0, &first, &left, &index)) {
+      GUNI_EMIT(length);
+      return count;
+    }
+  }
+  while (index < length) {
+    unsigned char lead = bytes[index];
+    /* Printable ASCII is Other, and Other × Other breaks. A run of it never
+     * touches the property trie. CR, LF, and DEL fall through to the rules. */
+    if (left == GUNI_GCB_OTHER && lead >= 0x20u && lead < 0x7Fu) {
+      do {
+        GUNI_EMIT(index);
+        left_start = index;
+        index++;
+        if (index >= length) {
+          break;
+        }
+        lead = bytes[index];
+      } while (lead >= 0x20u && lead < 0x7Fu);
+      left = GUNI_GCB_OTHER;
+      continue;
+    }
+    uint32_t cp = 0;
+    uint32_t gcb = 0;
+    size_t end = 0;
+    size_t at = index;
+    if (!classify_at(&subject, at, &cp, &gcb, &end)) {
+      index = at + 1;
+      continue;
+    }
+    if (grapheme_rules(&subject, at, left_start, left, cp, gcb)) {
+      GUNI_EMIT(at);
+    }
+    left = gcb;
+    left_start = at;
+    index = end;
+  }
+  GUNI_EMIT(length);
+#undef GUNI_EMIT
+  return count;
+}
+
 static GUNI_Result break_all(const GUNI_BreakOptions * options,
     const char * utf8, const uint32_t * codepoints, size_t len, size_t * out,
     size_t cap, size_t * out_len) {
@@ -1728,6 +2072,11 @@ static GUNI_Result break_all(const GUNI_BreakOptions * options,
     return GUNI_ERR_INVALID;
   }
   *out_len = 0;
+  if (codepoints == NULL && kind_of(options) == GUNI_BREAK_GRAPHEME) {
+    int overflow = 0;
+    *out_len = grapheme_fill(utf8, len, out, cap, &overflow);
+    return overflow ? GUNI_ERR_LIMIT : GUNI_OK;
+  }
   GUNI_BreakIter iter;
   if (codepoints != NULL) {
     guni_break_iter_init_codepoints(&iter, options, codepoints, len);

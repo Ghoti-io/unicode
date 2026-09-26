@@ -306,9 +306,10 @@ GUNI_API bool guni_break_at_codepoints(const GUNI_BreakOptions * options,
  * Caller-owned, no allocation, no hidden state: two iterators over one buffer
  * do not interact (design.md section 13.3). It is the shape a layout engine
  * wants - segment a paragraph once - where the point query is the shape a
- * regex engine wants, and both are the same rules: the iterator asks the point
- * query at each position, so there is one implementation and they cannot
- * disagree.
+ * regex engine wants, and both are the same rules, so they cannot disagree.
+ * Word, sentence, and line ask the point query at each character. The
+ * grapheme walk keeps the codepoint it just passed, and an ASCII byte takes
+ * its class from the byte.
  */
 typedef struct {
   const char * utf8;        ///< The text, if it is UTF-8. Not owned.
@@ -316,6 +317,16 @@ typedef struct {
   size_t length;            ///< Its length, in the caller's units.
   size_t position;          ///< The next offset to consider.
   GUNI_BreakOptions options; ///< A copy, so the caller's may go out of scope.
+  /**
+   * The codepoint immediately before @p position, saved so the next step
+   * does not decode it again. Meaningful only when @c cluster_resume equals
+   * @p position. A caller that writes @p position gets a fresh decode.
+   */
+  size_t cluster_resume;
+  size_t cluster_start;
+  uint32_t cluster_cp;
+  uint32_t cluster_gcb;
+  unsigned cluster_ready;
 } GUNI_BreakIter;
 
 /**

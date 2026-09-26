@@ -188,7 +188,10 @@ that the rules themselves are written as "is there a boundary between these
 two characters": UAX #29 and UAX #14 are both stated that way, so an
 implementation whose primitive is the walk has to invert every rule. One
 engine either way, so neither can disagree with the other; this way the code
-reads like the Standard.
+reads like the Standard. The grapheme walk applies those rules directly, and
+keeps the codepoint it just passed on the iterator. A string of printable
+ASCII is one grapheme per byte, and `guni_break_all()` writes that table in
+one pass.
 
 ### 4.3 Invalid input is a policy, and zero refuses
 
@@ -543,8 +546,9 @@ those words that a Thai paragraph will not wrap.
 ### 7.4 Segmentation state is the caller's
 
 An iterator is a caller-owned struct initialised by `guni_break_iter_init()`,
-holding the kind, the tailoring, the provider, and its position. No allocation;
-no hidden state; two iterators over one buffer do not interact.
+holding the kind, the tailoring, the provider, its position, and, for a
+grapheme walk, the codepoint it just passed. No allocation; no hidden state;
+two iterators over one buffer do not interact.
 
 ---
 
