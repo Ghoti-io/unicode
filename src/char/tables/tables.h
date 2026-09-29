@@ -83,7 +83,7 @@
 /* A composition key: the two codepoints, 21 bits each. */
 #define GUNI_COMPOSE_KEY(first, second) (((uint64_t)(first) << 21) | (uint64_t)(second))
 #define GUNI_PROPERTY_ALIAS_COUNT 184
-#define GUNI_VALUE_ALIAS_COUNT 2527
+#define GUNI_VALUE_ALIAS_COUNT 2674
 
 /**
  * @brief Every property of a codepoint, in one record.

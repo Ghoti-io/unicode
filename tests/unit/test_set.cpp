@@ -31,6 +31,8 @@
  */
 
 #include <cstdint>
+#include <fstream>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -384,6 +386,111 @@ TEST(Set, EveryRangeOfEveryValueAgreesWithThePointQuery) {
   /* The denominators, so that a loop that never ran cannot read as a pass. */
   EXPECT_GT(values_checked, static_cast<size_t>(1000));
   EXPECT_GT(ranges_checked, static_cast<size_t>(10000));
+}
+
+TEST(Set, EverySpellingTheUcdDefinesResolves) {
+  /* The gate that was missing when `blk` lost all 347 of its short value
+   * aliases - `Greek`, `Greek_Ext`, `ASCII` for `Basic_Latin`, 143 of them
+   * differing from the long name - while `gc=Lu`, `sc=Grek` and `lb=AL` all
+   * resolved and nothing pointed at the one property that did not.
+   *
+   * **The denominator is the UCD's, and that is the whole design.** A sweep
+   * over the spellings this library holds would have walked every name in
+   * its own tables, resolved all of them, and printed green: a spelling
+   * that was never recorded is not in the set such a sweep enumerates. So
+   * the list comes from PropertyValueAliases.txt, parsed by
+   * tools/ucd/gen_sweep.py - the second reader, not the one that generates
+   * the tables - and committed as a fixture so this runs on a clone with no
+   * network and no UCD.
+   *
+   * What it asserts is agreement rather than mere resolution: every
+   * spelling must give the same value the canonical long name gives, so a
+   * table that resolved a name to the wrong value fails here too. */
+  const std::string path
+      = gunitest::data(std::string("sweep/") + guni_ucd_version()
+          + ".spellings");
+  std::ifstream in(path);
+  ASSERT_TRUE(in.is_open()) << "fixture not found: " << path;
+
+  std::string line;
+  size_t declared = 0;
+  size_t checked = 0;
+  size_t skipped = 0;
+  size_t properties = 0;
+  std::set<std::string> skipped_keys;
+  std::string last_key;
+  while (std::getline(in, line)) {
+    if (line.empty() || line[0] == '#') {
+      continue;
+    }
+    if (line.rfind("version ", 0) == 0) {
+      EXPECT_EQ(line.substr(8), std::string(guni_ucd_version()))
+          << "fixture is for a different UCD than the library";
+      continue;
+    }
+    if (line.rfind("count ", 0) == 0) {
+      declared = static_cast<size_t>(std::stoul(line.substr(6)));
+      continue;
+    }
+    const size_t first = line.find('\t');
+    const size_t second = line.find('\t', first + 1);
+    ASSERT_NE(first, std::string::npos) << line;
+    ASSERT_NE(second, std::string::npos) << line;
+    const std::string key = line.substr(0, first);
+    const std::string spelling = line.substr(first + 1, second - first - 1);
+    const std::string canonical = line.substr(second + 1);
+
+    GUNI_Property id = static_cast<GUNI_Property>(0);
+    if (guni_property_by_name(key.data(), key.size(), &id) != GUNI_OK) {
+      /* A property this library does not carry at all is a different
+       * question from a spelling it lost. Six are absent and each is
+       * out of scope for a property-set API rather than missing: `age`
+       * is a version, `JSN` a string, `CE` a normalisation input, `bpt`
+       * bracket pairing, and `kEH_NoMirror`/`kEH_NoRotate` are Unihan.
+       *
+       * **Counted, not merely skipped.** The skip path is where a gate
+       * goes blind: a change that made some property unreachable by name
+       * would turn every one of its spellings into a silent `continue`
+       * and this test would still pass. So the skipped rows are added to
+       * the checked ones and the total must be the fixture's own count,
+       * and the number of distinct absent keys is held down as well. */
+      if (skipped_keys.insert(key).second) {
+        /* first time this key was seen */
+      }
+      skipped++;
+      continue;
+    }
+    if (key != last_key) {
+      properties++;
+      last_key = key;
+    }
+
+    uint32_t got = 0;
+    ASSERT_EQ(guni_value_by_name(id, spelling.data(), spelling.size(), &got),
+        GUNI_OK)
+        << key << "=" << spelling << " does not resolve";
+    uint32_t want = 0;
+    ASSERT_EQ(
+        guni_value_by_name(id, canonical.data(), canonical.size(), &want),
+        GUNI_OK)
+        << key << "=" << canonical << " (the canonical name) does not resolve";
+    EXPECT_EQ(got, want)
+        << key << "=" << spelling << " resolves to " << got << ", but "
+        << canonical << " is " << want;
+    checked++;
+  }
+
+  /* Denominators, so that a fixture that failed to load or a loop that
+   * never ran cannot read as a pass. Every row is accounted for: checked
+   * or explicitly skipped, and the skips are bounded by name count so
+   * that a property falling out of the lookup shows up here. */
+  EXPECT_EQ(checked + skipped, declared)
+      << "fixture says " << declared << " rows; checked " << checked
+      << " and skipped " << skipped;
+  EXPECT_GT(checked, static_cast<size_t>(2000));
+  EXPECT_GT(properties, static_cast<size_t>(20));
+  EXPECT_LE(skipped_keys.size(), static_cast<size_t>(6))
+      << "a property stopped resolving by name";
 }
 
 } // namespace

@@ -512,8 +512,45 @@ class Ucd:
                 for alias in [short, long_name] + extra:
                     self.canonical[(key, alias)] = long_name
                 self.long_of[key][long_name] = (short, extra)
+        # A second, loosely-keyed view of the same thing, for the one join
+        # that cannot be exact.
+        #
+        # **Blocks are named by two files that spell the long name
+        # differently.** Blocks.txt says `0370..03FF; Greek and Coptic` with
+        # spaces; PropertyValueAliases.txt says
+        # `blk; Greek ; Greek_And_Coptic` with underscores. Everything else
+        # here takes both sides of the join from PropertyValueAliases, so an
+        # exact lookup works and this view is never reached; for `blk` the
+        # left side comes from Blocks.txt and an exact lookup finds nothing.
+        #
+        # What that cost was every short block alias, all 347 of them, of
+        # which 143 differ from the long name - `Greek`, `Greek_Ext`, and
+        # `ASCII` for `Basic_Latin`. `guni_value_by_name(BLOCK, "Greek")`
+        # was GUNI_ERR_INVALID while `sc=Grek`, `gc=Lu` and `lb=AL` all
+        # resolved, and the alias pass that should have caught it *does*
+        # cover blocks and had simply never succeeded for one.
+        #
+        # UAX #44-LM3 says these spellings are one name, so joining them
+        # loosely is what the standard asks for rather than a workaround.
+        self.long_of_loose = {}
+        for key, table in self.long_of.items():
+            self.long_of_loose[key] = {
+                loose_name(long_name): value for long_name, value in table.items()
+            }
         self.properties = []
         self.load()
+
+    def alias_of(self, key, long_name):
+        """`(short, [extra])` for one value, joined loosely where it must be.
+
+        Exact first, so that a property whose two sides already agree is
+        unaffected and this stays a widening rather than a change.
+        """
+        table = self.long_of.get(key, {})
+        if long_name in table:
+            return table[long_name]
+        return self.long_of_loose.get(key, {}).get(loose_name(long_name),
+                                                   (None, []))
 
     def path(self, name):
         return os.path.join(self.dir, name)
@@ -1630,7 +1667,7 @@ def build_alias_tables(ucd, tables, entries):
                 if not long_name:
                     continue
                 spellings[value].add(long_name)
-                short, extra = ucd.long_of.get(key, {}).get(long_name, (None, []))
+                short, extra = ucd.alias_of(key, long_name)
                 if short:
                     spellings[value].add(short)
                 for alias in extra:
@@ -1861,8 +1898,31 @@ extern "C" {
 
         block = tables.block_numbering
         out.write("\n/**\n * @brief Block, from Blocks.txt.\n */\ntypedef enum {\n")
+        # The short alias beside the long member, which this enum did not
+        # have and which the file header at the top of this page promises
+        # for every enumerated value: "the long alias as the canonical
+        # member and the UCD's short alias beside it where they differ".
+        # Blocks were the one kind that did not keep it - GUNI_BLOCK_ASCII
+        # did not exist beside GUNI_BLOCK_BASIC_LATIN - for the same
+        # two-file spelling mismatch that cost the name lookups, so the
+        # join is Ucd.alias_of() here too.
+        #
+        # Additive: an alias member takes an existing member's value and
+        # never introduces or renumbers one, so the append-only rule in
+        # design.md section 2 (M12) is untouched.
+        block_emitted = set()
         for name in block.order:
-            out.write("  %s = %d,\n" % (block.member(name), block.values[name]))
+            member = block.member(name)
+            out.write("  %s = %d,\n" % (member, block.values[name]))
+            block_emitted.add(member)
+        for name in block.order:
+            member = block.member(name)
+            short, extra = ucd.alias_of("blk", name)
+            for alias in ([short] if short else []) + list(extra):
+                alias_member = "GUNI_BLOCK_%s" % c_identifier(alias)
+                if alias_member not in block_emitted:
+                    out.write("  %s = %s,\n" % (alias_member, member))
+                    block_emitted.add(alias_member)
         for member, value in sorted(block.retired.items(), key=lambda kv: kv[1]):
             out.write("  %s = %d, /* not in UCD %s; kept, never reused */\n"
                       % (member, value, version))
