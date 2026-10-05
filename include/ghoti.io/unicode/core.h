@@ -81,7 +81,7 @@ GUNI_API const char * guni_result_string(GUNI_Result result);
 typedef struct GUNI_Limits {
   /**
    * Longest text any one call walks, in bytes. A caller that hands over
-   * more gets @ref GUNI_ERR_LIMIT rather than a walk that takes a minute.
+   * more gets @c GUNI_ERR_LIMIT rather than a walk that takes a minute.
    * Default 64 MiB.
    */
   size_t max_text_bytes;

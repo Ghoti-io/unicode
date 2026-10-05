@@ -323,10 +323,10 @@ typedef struct {
    * @p position. A caller that writes @p position gets a fresh decode.
    */
   size_t cluster_resume;
-  size_t cluster_start;
-  uint32_t cluster_cp;
-  uint32_t cluster_gcb;
-  unsigned cluster_ready;
+  size_t cluster_start; ///< Offset at which the cached cluster began.
+  uint32_t cluster_cp; ///< The cached codepoint; see @c cluster_resume.
+  uint32_t cluster_gcb; ///< Its Grapheme_Cluster_Break value.
+  unsigned cluster_ready; ///< Nonzero when the cluster cache is populated.
 } GUNI_BreakIter;
 
 /**
