@@ -173,7 +173,6 @@ bool guni_script_run_utf8(const char * text, size_t len) {
   GUNI_ScriptRun state;
   guni_script_run_begin(&state);
   size_t offset = 0;
-  size_t count = 0;
   while (offset < len) {
     uint32_t cp = 0;
     bool valid = false;
@@ -184,7 +183,6 @@ bool guni_script_run_utf8(const char * text, size_t len) {
        * string, and this is not one. */
       return false;
     }
-    ++count;
     if (!guni_script_run_add(&state, cp)) {
       return false;
     }
